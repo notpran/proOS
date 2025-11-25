@@ -8,7 +8,6 @@
 #include <stdint.h>
 
 #define MAX_WINDOWS 4
-#define GLYPH_WIDTH 8
 #define TITLE_BAR_PADDING 2
 #define BORDER_COLOR 0x00222222
 #define TITLE_BAR_COLOR 0x003a6ea5
@@ -36,6 +35,8 @@ static int demo_ready = 0;
 static const uint8_t *gfx_font_base = &font8x8_basic[0][0];
 static uint32_t gfx_font_stride = 8;
 static uint32_t gfx_font_height = 8;
+static uint32_t gfx_font_width = 8;
+static uint32_t gfx_font_row_bytes = 1;
 static uint32_t gfx_font_first_char = 32;
 static uint32_t gfx_font_char_count = 96;
 static int gfx_title_bar_height = (8 + TITLE_BAR_PADDING);
@@ -51,14 +52,18 @@ static void gfx_refresh_font(void)
     const uint8_t *base = vbe_font_table();
     uint32_t stride = vbe_font_stride();
     uint32_t height = vbe_font_height();
+    uint32_t width = vbe_font_width();
+    uint32_t row_bytes = vbe_font_row_bytes();
     uint32_t first = vbe_font_first_char();
     uint32_t count = vbe_font_char_count();
 
-    if (base && stride != 0 && height >= 8)
+    if (base && stride != 0 && height >= 8 && width != 0 && row_bytes != 0)
     {
         gfx_font_base = base;
         gfx_font_stride = stride;
         gfx_font_height = height;
+        gfx_font_width = width;
+        gfx_font_row_bytes = row_bytes;
         gfx_font_first_char = first;
         gfx_font_char_count = (count != 0) ? count : 256;
         gfx_font_lsb_left = vbe_font_lsb_left();
@@ -68,6 +73,8 @@ static void gfx_refresh_font(void)
         gfx_font_base = &font8x8_basic[0][0];
         gfx_font_stride = 8;
         gfx_font_height = 8;
+        gfx_font_width = 8;
+        gfx_font_row_bytes = 1;
         gfx_font_first_char = 32;
         gfx_font_char_count = 96;
         gfx_font_lsb_left = 1;
@@ -147,15 +154,16 @@ static void window_draw_char(struct window *w, int px, int py, char c, uint32_t 
         int dst_y = py + (int)y;
         if (dst_y < 0 || dst_y >= w->h)
             continue;
-        uint8_t row = glyph[y];
+        const uint8_t *row_ptr = glyph + y * gfx_font_row_bytes;
         uint32_t *dst = w->pixels + dst_y * w->w;
-        for (int x = 0; x < GLYPH_WIDTH; ++x)
+        for (uint32_t x = 0; x < gfx_font_width; ++x)
         {
-            int dst_x = px + x;
+            int dst_x = px + (int)x;
             if (dst_x < 0 || dst_x >= w->w)
                 continue;
-            uint8_t mask = gfx_font_lsb_left ? (uint8_t)(1u << x) : (uint8_t)(0x80u >> x);
-            dst[dst_x] = (row & mask) ? fg : bg;
+            uint8_t row_byte = row_ptr[x / 8];
+            uint8_t mask = gfx_font_lsb_left ? (uint8_t)(1u << (x & 7)) : (uint8_t)(0x80u >> (x & 7));
+            dst[dst_x] = (row_byte & mask) ? fg : bg;
         }
     }
 }
@@ -174,7 +182,7 @@ static void window_draw_text(struct window *w, int x, int y, const char *text, u
             continue;
         }
         window_draw_char(w, cursor_x, cursor_y, *text++, fg, bg);
-        cursor_x += GLYPH_WIDTH;
+        cursor_x += (int)gfx_font_width;
     }
 }
 

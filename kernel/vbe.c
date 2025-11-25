@@ -1,12 +1,26 @@
 #include "vbe.h"
 #include "fb_font.h"
+#include "fat16.h"
+#include "memory.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 #define CONSOLE_COLUMNS 80
 #define CONSOLE_ROWS 25
-#define FONT_WIDTH 8
+#define DEFAULT_FONT_WIDTH 8
+#define FONT_FILE_NAME "font.psf"
+
+struct parsed_font
+{
+    const uint8_t *glyph_base;
+    uint32_t stride;
+    uint32_t height;
+    uint32_t width;
+    uint32_t first_char;
+    uint32_t glyph_count;
+    int lsb_left;
+};
 
 static const struct boot_info *bootinfo = (const struct boot_info *)BOOT_INFO_ADDR;
 static uint32_t *fb_ptr = NULL;
@@ -18,9 +32,12 @@ static int vbe_ready = 0;
 static const uint8_t *font_base = &font8x8_basic[0][0];
 static uint32_t font_stride = 8;
 static uint32_t font_height_px = 8;
+static uint32_t font_width_px = DEFAULT_FONT_WIDTH;
+static uint32_t font_row_bytes = 1;
 static uint32_t font_first_char = 32;
 static uint32_t font_char_count = 96;
 static int font_lsb_left = 1;
+static uint8_t *font_external_blob = NULL;
 
 static uint8_t console_fg = 0x0F;
 static uint8_t console_bg = 0x00;
@@ -35,6 +52,33 @@ static uint32_t vga_palette[16] = {
     0x00555555, 0x005555FF, 0x0055FF55, 0x0055FFFF,
     0x00FF5555, 0x00FF55FF, 0x00FFFF55, 0x00FFFFFF
 };
+
+static int configure_font_metrics(uint32_t height, uint32_t stride, uint32_t width_hint, uint32_t first_char, uint32_t count, int lsb_left)
+{
+    if (height == 0 || stride == 0)
+        return 0;
+    if (stride % height != 0)
+        return 0;
+
+    font_height_px = height;
+    font_stride = stride;
+    font_row_bytes = stride / height;
+    if (font_row_bytes == 0)
+        return 0;
+
+    if (width_hint != 0)
+        font_width_px = width_hint;
+    else
+        font_width_px = font_row_bytes * 8;
+
+    if (font_width_px == 0)
+        font_width_px = DEFAULT_FONT_WIDTH;
+
+    font_first_char = first_char;
+    font_char_count = (count != 0) ? count : 256;
+    font_lsb_left = lsb_left;
+    return 1;
+}
 
 static inline uint32_t attr_to_color(uint8_t attr)
 {
@@ -70,20 +114,21 @@ static void draw_glyph(int px, int py, char c, uint32_t fg, uint32_t bg)
 
     for (uint32_t y = 0; y < font_height_px; ++y)
     {
-        uint8_t row = glyph[y];
         int dst_y = py + (int)y;
         if (dst_y < 0 || (uint32_t)dst_y >= fb_h)
             continue;
 
-        uint32_t *dst = fb_ptr + dst_y * fb_pitch_pixels + px;
-        for (int x = 0; x < FONT_WIDTH; ++x)
+        const uint8_t *row_ptr = glyph + y * font_row_bytes;
+        uint32_t *dst_row = fb_ptr + dst_y * fb_pitch_pixels;
+        for (uint32_t x = 0; x < font_width_px; ++x)
         {
-            int dst_x = px + x;
+            int dst_x = px + (int)x;
             if (dst_x < 0 || (uint32_t)dst_x >= fb_w)
                 continue;
-            uint8_t mask = font_lsb_left ? (uint8_t)(1u << x) : (uint8_t)(0x80u >> x);
-            uint32_t color = (row & mask) ? fg : bg;
-            dst[x] = color;
+            uint8_t row_byte = row_ptr[x / 8];
+            uint8_t mask = font_lsb_left ? (uint8_t)(1u << (x & 7)) : (uint8_t)(0x80u >> (x & 7));
+            uint32_t color = (row_byte & mask) ? fg : bg;
+            dst_row[dst_x] = color;
         }
     }
 }
@@ -100,7 +145,7 @@ static void console_redraw(void)
             uint8_t attr = console_attr[y][x];
             uint32_t fg = attr_to_color(attr & 0x0F);
             uint32_t bg = attr_to_color((attr >> 4) & 0x0F);
-            draw_glyph(x * FONT_WIDTH, (int)(y * font_height_px), console_chars[y][x], fg, bg);
+            draw_glyph(x * (int)font_width_px, (int)(y * font_height_px), console_chars[y][x], fg, bg);
         }
     }
 }
@@ -148,12 +193,10 @@ static void console_newline(void)
 
 int vbe_init(void)
 {
+    font_external_blob = NULL;
     font_base = &font8x8_basic[0][0];
-    font_stride = 8;
-    font_height_px = 8;
-    font_first_char = 32;
-    font_char_count = 96;
-    font_lsb_left = 1;
+    if (!configure_font_metrics(8, 8, DEFAULT_FONT_WIDTH, 32, 96, 1))
+        return 0;
 
     if (bootinfo->magic != BOOT_INFO_MAGIC || bootinfo->fb_bpp != 32)
     {
@@ -169,15 +212,15 @@ int vbe_init(void)
 
     if (bootinfo->font_ptr && bootinfo->font_height >= 8 && bootinfo->font_bytes_per_char >= bootinfo->font_height)
     {
-        font_base = (const uint8_t *)(uintptr_t)bootinfo->font_ptr;
-        font_stride = bootinfo->font_bytes_per_char;
-        font_height_px = bootinfo->font_height;
-        font_first_char = 0;
+        const uint8_t *candidate = (const uint8_t *)(uintptr_t)bootinfo->font_ptr;
+        uint32_t stride = bootinfo->font_bytes_per_char;
+        uint32_t height = bootinfo->font_height;
         uint32_t count = bootinfo->font_char_count;
         if (count == 0)
             count = 256;
-        font_char_count = count;
-        font_lsb_left = (bootinfo->font_flags & 1u) ? 1 : 0;
+        int lsb = (bootinfo->font_flags & 1u) ? 1 : 0;
+        if (configure_font_metrics(height, stride, DEFAULT_FONT_WIDTH, 0, count, lsb))
+            font_base = candidate;
     }
 
     vbe_clear(0x00000000);
@@ -269,7 +312,7 @@ void vbe_draw_text(int x, int y, const char *text, uint32_t fg, uint32_t bg)
     while (*text)
     {
         vbe_draw_char(x, y, *text++, fg, bg);
-        x += FONT_WIDTH;
+        x += (int)font_width_px;
     }
 }
 
@@ -318,15 +361,101 @@ void vbe_console_putc(char c)
         }
         console_chars[console_row][console_col] = ' ';
         console_attr[console_row][console_col] = (console_bg << 4) | console_fg;
-        draw_glyph((int)console_col * FONT_WIDTH, (int)(console_row * font_height_px), ' ', attr_to_color(console_fg), attr_to_color(console_bg));
+        draw_glyph((int)console_col * (int)font_width_px, (int)(console_row * font_height_px), ' ', attr_to_color(console_fg), attr_to_color(console_bg));
         return;
     }
 
     console_chars[console_row][console_col] = c;
     console_attr[console_row][console_col] = ((console_bg & 0x0F) << 4) | (console_fg & 0x0F);
-    draw_glyph((int)console_col * FONT_WIDTH, (int)(console_row * font_height_px), c, attr_to_color(console_fg), attr_to_color(console_bg));
+    draw_glyph((int)console_col * (int)font_width_px, (int)(console_row * font_height_px), c, attr_to_color(console_fg), attr_to_color(console_bg));
     if (++console_col >= CONSOLE_COLUMNS)
         console_newline();
+}
+
+#define PSF2_MAGIC 0x864AB572u
+
+struct psf2_header
+{
+    uint32_t magic;
+    uint32_t version;
+    uint32_t header_size;
+    uint32_t flags;
+    uint32_t glyph_count;
+    uint32_t glyph_size;
+    uint32_t height;
+    uint32_t width;
+};
+
+static int parse_psf_font(uint8_t *buffer, size_t size, struct parsed_font *out)
+{
+    if (!buffer || !out || size < sizeof(struct psf2_header))
+        return 0;
+
+    const struct psf2_header *hdr = (const struct psf2_header *)buffer;
+    if (hdr->magic != PSF2_MAGIC)
+        return 0;
+    if (hdr->header_size < sizeof(struct psf2_header) || hdr->header_size > size)
+        return 0;
+
+    size_t glyph_bytes = (size_t)hdr->glyph_count * (size_t)hdr->glyph_size;
+    if (hdr->glyph_count == 0 || hdr->glyph_size == 0)
+        return 0;
+    if (hdr->height == 0 || hdr->width == 0)
+        return 0;
+    if ((size_t)hdr->header_size + glyph_bytes > size)
+        return 0;
+    if (hdr->glyph_size % hdr->height != 0)
+        return 0;
+    uint32_t row_bytes = hdr->glyph_size / hdr->height;
+    if (row_bytes == 0)
+        return 0;
+    if ((uint32_t)(row_bytes * 8) < hdr->width)
+        return 0;
+
+    out->glyph_base = buffer + hdr->header_size;
+    out->stride = hdr->glyph_size;
+    out->height = hdr->height;
+    out->width = hdr->width;
+    out->first_char = 0;
+    out->glyph_count = hdr->glyph_count;
+    out->lsb_left = 0;
+    return 1;
+}
+
+int vbe_try_load_font_from_fat(void)
+{
+    if (!vbe_ready || font_external_blob)
+        return 0;
+    if (!fat16_ready())
+        return 0;
+
+    uint32_t font_size = 0;
+    if (fat16_file_size(FONT_FILE_NAME, &font_size) < 0 || font_size == 0)
+        return 0;
+
+    uint8_t *buffer = (uint8_t *)kalloc(font_size);
+    if (!buffer)
+        return 0;
+
+    size_t read_size = 0;
+    int status = fat16_read_file(FONT_FILE_NAME, buffer, font_size, &read_size);
+    if (status < 0 || read_size != font_size)
+        return 0;
+
+    struct parsed_font candidate;
+    if (!parse_psf_font(buffer, read_size, &candidate))
+        return 0;
+
+    if (fb_w != 0 && candidate.width * CONSOLE_COLUMNS > fb_w)
+        return 0;
+
+    if (!configure_font_metrics(candidate.height, candidate.stride, candidate.width, candidate.first_char, candidate.glyph_count, candidate.lsb_left))
+        return 0;
+
+    font_external_blob = buffer;
+    font_base = candidate.glyph_base;
+    console_redraw();
+    return 1;
 }
 
 const uint8_t *vbe_font_table(void)
@@ -342,6 +471,16 @@ uint32_t vbe_font_stride(void)
 uint32_t vbe_font_height(void)
 {
     return font_height_px;
+}
+
+uint32_t vbe_font_width(void)
+{
+    return font_width_px;
+}
+
+uint32_t vbe_font_row_bytes(void)
+{
+    return font_row_bytes;
 }
 
 uint32_t vbe_font_first_char(void)

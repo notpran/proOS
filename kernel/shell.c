@@ -10,7 +10,7 @@
 #include "fat16.h"
 #include "gfx.h"
 
-#define SHELL_PROMPT "proos> "
+#define SHELL_PROMPT "proOS >> "
 #define INPUT_MAX 256
 
 static size_t str_len(const char *s)

@@ -16,7 +16,7 @@ DISK_IMG := $(BUILD_DIR)/proos.img
 ISO_IMG := $(BUILD_DIR)/proos.iso
 FAT16_IMG_TOOL := $(BUILD_DIR)/fat16_image.exe
 FAT16_IMG := $(BUILD_DIR)/fat16.img
-FAT16_SECTORS := 32
+FAT16_SECTORS := 128
 FAT16_OFFSET := 69
 
 KERNEL_OBJS := $(BUILD_DIR)/crt0.o \

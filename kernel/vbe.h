@@ -34,9 +34,12 @@ const struct boot_info *boot_info_get(void);
 const uint8_t *vbe_font_table(void);
 uint32_t vbe_font_stride(void);
 uint32_t vbe_font_height(void);
+uint32_t vbe_font_width(void);
+uint32_t vbe_font_row_bytes(void);
 uint32_t vbe_font_first_char(void);
 uint32_t vbe_font_char_count(void);
 int vbe_font_lsb_left(void);
+int vbe_try_load_font_from_fat(void);
 
 uint32_t *vbe_framebuffer(void);
 uint32_t vbe_pitch(void);

@@ -49,6 +49,36 @@ static const uint8_t *sector_ptr(uint32_t sector)
     return volume_base + offset;
 }
 
+static int name_matches(const uint8_t *entry, const char *name);
+
+static const uint8_t *find_root_entry(const char *path)
+{
+    if (!fat_ready || !path)
+        return NULL;
+
+    const uint8_t *root = sector_ptr(bpb.root_start);
+    if (!root)
+        return NULL;
+
+    size_t entries = bpb.root_entries;
+    for (size_t i = 0; i < entries; ++i)
+    {
+        const uint8_t *entry = root + i * 32;
+        uint8_t first = entry[0];
+        if (first == 0x00)
+            break;
+        if (first == 0xE5)
+            continue;
+        uint8_t attr = entry[11];
+        if (attr == 0x0F || (attr & 0x08))
+            continue;
+        if (name_matches(entry, path))
+            return entry;
+    }
+
+    return NULL;
+}
+
 int fat16_init(const void *base, size_t size)
 {
     fat_ready = 0;
@@ -227,44 +257,58 @@ static uint16_t fat_next_cluster(uint16_t cluster)
 
 int fat16_read(const char *path, char *out, size_t max_len)
 {
+    if (!out || max_len == 0)
+        return -1;
+
+    size_t usable = max_len - 1;
+    if (usable == 0)
+    {
+        out[0] = '\0';
+        return 0;
+    }
+
+    size_t bytes_read = 0;
+    int status = fat16_read_file(path, out, usable, &bytes_read);
+    if (status < 0)
+        return -1;
+
+    if (bytes_read < usable)
+        out[bytes_read] = '\0';
+    else
+        out[usable] = '\0';
+
+    return (int)bytes_read;
+}
+
+int fat16_file_size(const char *path, uint32_t *out_size)
+{
+    const uint8_t *entry = find_root_entry(path);
+    if (!entry)
+        return -1;
+
+    if (out_size)
+        *out_size = read_u32(entry + 28);
+    return 0;
+}
+
+int fat16_read_file(const char *path, void *out, size_t max_len, size_t *out_size)
+{
     if (!fat_ready || !path || !out || max_len == 0)
         return -1;
 
-    const uint8_t *root = sector_ptr(bpb.root_start);
-    if (!root)
+    const uint8_t *entry = find_root_entry(path);
+    if (!entry)
         return -1;
 
-    const uint8_t *match = NULL;
-    size_t entries = bpb.root_entries;
-    for (size_t i = 0; i < entries; ++i)
-    {
-        const uint8_t *entry = root + i * 32;
-        uint8_t first = entry[0];
-        if (first == 0x00)
-            break;
-        if (first == 0xE5)
-            continue;
-        uint8_t attr = entry[11];
-        if (attr == 0x0F || (attr & 0x08))
-            continue;
-        if (name_matches(entry, path))
-        {
-            match = entry;
-            break;
-        }
-    }
-
-    if (!match)
-        return -1;
-
-    uint32_t file_size = read_u32(match + 28);
-    uint16_t cluster = read_u16(match + 26);
+    uint32_t file_size = read_u32(entry + 28);
+    uint16_t cluster = read_u16(entry + 26);
+    uint8_t *dst = (uint8_t *)out;
     size_t copied = 0;
 
-    while (cluster >= 2 && cluster < 0xFFF8 && copied < max_len)
+    while (cluster >= 2 && cluster < 0xFFF8 && copied < max_len && copied < file_size)
     {
         uint32_t sector = cluster_to_sector(cluster);
-        for (uint8_t s = 0; s < bpb.sectors_per_cluster; ++s)
+        for (uint8_t s = 0; s < bpb.sectors_per_cluster && copied < max_len && copied < file_size; ++s)
         {
             const uint8_t *data = sector_ptr(sector + s);
             if (!data)
@@ -275,21 +319,16 @@ int fat16_read(const char *path, char *out, size_t max_len)
             if (copied + to_copy > file_size)
                 to_copy = file_size - copied;
             for (size_t i = 0; i < to_copy; ++i)
-                out[copied + i] = (char)data[i];
+                dst[copied + i] = data[i];
             copied += to_copy;
-            if (copied >= file_size)
-                break;
         }
-        if (copied >= file_size)
+        if (copied >= file_size || copied >= max_len)
             break;
         cluster = fat_next_cluster(cluster);
     }
 
-    if (copied >= max_len)
-        copied = max_len - 1;
+    if (out_size)
+        *out_size = copied;
 
-    if (copied < max_len)
-        out[copied] = '\0';
-
-    return (int)copied;
+    return (copied == file_size) ? 0 : ((copied < file_size) ? 1 : 0);
 }
