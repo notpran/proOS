@@ -1,6 +1,12 @@
+<<<<<<< HEAD
 # proOS Phase 4
 
 proOS is a BIOS/MBR 32-bit hobby operating system. Phase 4 layers a read-only FAT16 loader and a simple framebuffer compositor on top of the Phase 1–3 base (boot chain, interrupts, cooperative scheduler, and IPC).
+=======
+# proOS
+
+proOS is a BIOS/MBR 32-bit hobby operating system made by me!
+>>>>>>> 80a19d1816f8ad0bad606b77190988b27f912bc5
 
 ## Repository Layout
 
@@ -60,19 +66,6 @@ make clean
 ```bash
 make run-qemu
 ```
-
-## Run in VirtualBox
-
-1. Convert the raw image to VDI:
-   ```bash
-   VBoxManage convertfromraw build/proos.img build/proos.vdi --format VDI
-   ```
-2. Create a new VirtualBox VM (Other/Unknown, 32-bit) with 32 MB RAM.
-3. Attach `build/proos.vdi` as the primary disk.
-4. Boot the VM.
-
-Alternatively, attach `proos.img` as a virtual floppy/RAW disk if your setup supports it.
-
 ## Expected Boot Flow
 
 1. `mbr.asm` loads `stage2.asm` into 0x7E00.
@@ -99,5 +92,3 @@ Alternatively, attach `proos.img` as a virtual floppy/RAW disk if your setup sup
 - `mem` reports hard-coded values.
 - RAMFS remains a stub for scratch files.
 - `reboot` relies on controller reset and may fall through to an infinite `hlt` if unsupported.
-
-See `tests.md` for manual test guidance.
