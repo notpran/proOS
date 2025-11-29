@@ -4,11 +4,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define MAX_PROCS 16
-#define PROC_STACK_SIZE 4096
+#include "config.h"
 
-#define MSG_QUEUE_LEN 8
-#define MSG_DATA_MAX 256
+#define MAX_PROCS       CONFIG_MAX_PROCS
+#define PROC_STACK_SIZE CONFIG_PROC_STACK_SIZE
+
+#define MSG_QUEUE_LEN CONFIG_MSG_QUEUE_LEN
+#define MSG_DATA_MAX  CONFIG_MSG_DATA_MAX
 
 typedef enum
 {
@@ -60,6 +62,7 @@ void process_schedule(void);
 struct process *process_current(void);
 struct process *process_lookup(int pid);
 void process_debug_list(void);
+int process_count(void);
 
 /* IPC helpers exposed to syscall layer */
 int ipc_send(int target_pid, int from_pid, const char *data, size_t len);

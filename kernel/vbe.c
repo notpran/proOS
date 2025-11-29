@@ -500,7 +500,7 @@ static int parse_psf_font(const uint8_t *buffer, size_t size, struct parsed_font
     out->width = hdr->width;
     out->first_char = 0;
     out->glyph_count = hdr->glyph_count;
-    out->lsb_left = 0;
+    out->lsb_left = font_lsb_left;
     return 1;
 }
 

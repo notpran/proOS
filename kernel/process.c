@@ -1,5 +1,6 @@
 #include "proc.h"
 #include "vga.h"
+#include "klog.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -12,6 +13,34 @@ static struct process *current_process = NULL;
 static int current_index = -1;
 static int next_pid = 1;
 static int scheduler_active = 0;
+
+static int int_to_string(int value, char *out);
+
+static void log_process_event(const char *prefix, int pid)
+{
+    if (!prefix)
+        return;
+
+    char buffer[64];
+    int idx = 0;
+
+    while (prefix[idx] && idx < (int)(sizeof(buffer) - 1))
+    {
+        buffer[idx] = prefix[idx];
+        ++idx;
+    }
+
+    if (idx < (int)(sizeof(buffer) - 1))
+    {
+        char num[16];
+        int num_len = int_to_string(pid, num);
+        for (int i = 0; i < num_len && idx < (int)(sizeof(buffer) - 1); ++i)
+            buffer[idx++] = num[i];
+    }
+
+    buffer[idx] = '\0';
+    klog_debug(buffer);
+}
 
 static void zero_memory(void *ptr, size_t size)
 {
@@ -157,6 +186,8 @@ int process_create(void (*entry)(void), size_t stack_size)
     proc->queue.count = 0;
     proc->exit_code = 0;
 
+    log_process_event("process: created pid ", proc->pid);
+
     return proc->pid;
 }
 
@@ -203,6 +234,7 @@ void process_exit(int code)
 
     proc->exit_code = code;
     proc->state = PROC_ZOMBIE;
+    log_process_event("process: exit pid ", proc->pid);
     context_switch(&proc->ctx, &scheduler_ctx);
 
     for (;;)
@@ -259,12 +291,27 @@ void process_schedule(void)
             finished->state = PROC_READY;
 
         if (finished && finished->state == PROC_ZOMBIE)
+        {
+            int pid = finished->pid;
             reclaim_zombie(finished);
+            log_process_event("process: reclaimed pid ", pid);
+        }
 
         current_process = NULL;
     }
 
     scheduler_active = 0;
+}
+
+int process_count(void)
+{
+    int total = 0;
+    for (int i = 0; i < MAX_PROCS; ++i)
+    {
+        if (processes[i].state != PROC_UNUSED)
+            ++total;
+    }
+    return total;
 }
 
 void process_debug_list(void)

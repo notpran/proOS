@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stddef.h>
+#include <limits.h>
 
 #include "vga.h"
 #include "keyboard.h"
@@ -9,6 +10,7 @@
 #include "proc.h"
 #include "fat16.h"
 #include "gfx.h"
+#include "klog.h"
 
 #define SHELL_PROMPT "proOS >> "
 #define INPUT_MAX 256
@@ -77,6 +79,33 @@ static void trim_trailing_spaces(char *str)
         str[len - 1] = '\0';
         --len;
     }
+}
+
+static int parse_positive_int(const char *text, int *out_value)
+{
+    if (!text || !out_value)
+        return 0;
+
+    int value = 0;
+    if (*text == '\0')
+        return 0;
+
+    for (size_t i = 0; text[i]; ++i)
+    {
+        char c = text[i];
+        if (c < '0' || c > '9')
+            return 0;
+        int digit = c - '0';
+        if (value > (INT_MAX - digit) / 10)
+            return 0;
+        value = value * 10 + digit;
+    }
+
+    if (value <= 0)
+        return 0;
+
+    *out_value = value;
+    return 1;
 }
 
 static size_t shell_read_line(char *buffer, size_t max_len)
@@ -157,6 +186,11 @@ static void command_help(void)
     vga_write_line("  lsfs   - list FAT16 files");
     vga_write_line("  catfs  - print FAT16 file");
     vga_write_line("  gfx    - draw compositor demo");
+    vga_write_line("  kdlg   - show kernel log");
+    vga_write_line("  kdlvl [lvl] - adjust log verbosity");
+    vga_write_line("  proc_count - show active process count");
+    vga_write_line("  spawn <n> - stress process creation");
+    vga_write_line("  shutdown - power off the system");
     vga_write_line("  proc_list - list processes");
 }
 
@@ -397,6 +431,211 @@ static void command_gfx(void)
         vga_write_line("Graphics demo failed.");
 }
 
+/* Simple kernel worker that spins and yields to exercise the scheduler. */
+static void stress_worker(void)
+{
+    for (;;)
+    {
+        for (volatile int i = 0; i < CONFIG_STRESS_SPIN_CYCLES; ++i)
+            __asm__ __volatile__("nop");
+        process_yield();
+    }
+}
+
+static void command_kdlg(void)
+{
+    static struct klog_entry entries[CONFIG_KLOG_CAPACITY];
+    size_t count = klog_copy(entries, CONFIG_KLOG_CAPACITY);
+    if (count == 0)
+    {
+        vga_write_line("kdlg: no entries");
+        return;
+    }
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        char seq_buf[32];
+        write_u64((uint64_t)entries[i].seq, seq_buf);
+
+        const char *level = klog_level_name(entries[i].level);
+        const char *text = entries[i].text;
+
+        char line[CONFIG_KLOG_ENTRY_LEN + 32];
+        size_t idx = 0;
+
+        line[idx++] = '[';
+        for (size_t j = 0; seq_buf[j] && idx < sizeof(line) - 1; ++j)
+            line[idx++] = seq_buf[j];
+        if (idx < sizeof(line) - 1)
+            line[idx++] = ']';
+        if (idx < sizeof(line) - 1)
+            line[idx++] = ' ';
+
+        for (size_t j = 0; level[j] && idx < sizeof(line) - 1; ++j)
+            line[idx++] = level[j];
+        if (idx < sizeof(line) - 1)
+        {
+            line[idx++] = ':';
+            line[idx++] = ' ';
+        }
+
+        for (size_t j = 0; text[j] && idx < sizeof(line) - 1; ++j)
+            line[idx++] = text[j];
+
+        line[idx] = '\0';
+        vga_write_line(line);
+    }
+}
+
+static void command_kdlvl(const char *args)
+{
+    const char *token = skip_spaces(args);
+    if (*token == '\0')
+    {
+        const char *name = klog_level_name(klog_get_level());
+        vga_write("kdlvl: ");
+        vga_write_line(name);
+        return;
+    }
+
+    char buffer[12];
+    size_t idx = 0;
+    while (token[idx] && token[idx] != ' ' && idx + 1 < sizeof(buffer))
+    {
+        buffer[idx] = token[idx];
+        ++idx;
+    }
+    buffer[idx] = '\0';
+
+    int level = klog_level_from_name(buffer);
+    if (level < 0)
+    {
+        vga_write_line("Usage: kdlvl [debug|info|warn|error|0-3]");
+        return;
+    }
+
+    klog_set_level(level);
+
+    const char *name = klog_level_name(level);
+
+    char logbuf[48];
+    const char *prefix = "kdlvl: level set to ";
+    size_t pos = 0;
+    while (prefix[pos] && pos < sizeof(logbuf) - 1)
+    {
+        logbuf[pos] = prefix[pos];
+        ++pos;
+    }
+    for (size_t i = 0; name[i] && pos < sizeof(logbuf) - 1; ++i)
+        logbuf[pos++] = name[i];
+    logbuf[pos] = '\0';
+
+    klog_emit(level, logbuf);
+
+    vga_write("kdlvl set to ");
+    vga_write_line(name);
+}
+
+static void command_proc_count(void)
+{
+    int total = process_count();
+    char buffer[32];
+    write_u64((uint64_t)total, buffer);
+    vga_write("Processes active: ");
+    vga_write_line(buffer);
+}
+
+static void command_spawn(const char *args)
+{
+    const char *token = skip_spaces(args);
+    if (*token == '\0')
+    {
+        vga_write_line("Usage: spawn <count>");
+        return;
+    }
+
+    char buffer[16];
+    size_t idx = 0;
+    while (token[idx] && token[idx] != ' ' && idx + 1 < sizeof(buffer))
+    {
+        buffer[idx] = token[idx];
+        ++idx;
+    }
+    buffer[idx] = '\0';
+
+    int requested = 0;
+    if (!parse_positive_int(buffer, &requested))
+    {
+        vga_write_line("spawn: invalid count");
+        return;
+    }
+
+    int available = MAX_PROCS - process_count();
+    if (available <= 0)
+    {
+        vga_write_line("spawn: no slots available");
+        return;
+    }
+
+    int to_create = (requested < available) ? requested : available;
+    int spawned = 0;
+    for (int i = 0; i < to_create; ++i)
+    {
+        if (process_create(stress_worker, PROC_STACK_SIZE) < 0)
+            break;
+        ++spawned;
+    }
+
+    char spawned_buf[32];
+    char requested_buf[32];
+    write_u64((uint64_t)spawned, spawned_buf);
+    write_u64((uint64_t)requested, requested_buf);
+
+    vga_write("spawn: created ");
+    vga_write(spawned_buf);
+    vga_write(" of ");
+    vga_write(requested_buf);
+    vga_write_line(" requested");
+
+    if (spawned < requested)
+        vga_write_line("spawn: limited by process capacity");
+
+    char logbuf[80];
+    const char *prefix = "spawn: requested ";
+    size_t pos = 0;
+    while (prefix[pos] && pos < sizeof(logbuf) - 1)
+    {
+        logbuf[pos] = prefix[pos];
+        ++pos;
+    }
+    for (size_t i = 0; requested_buf[i] && pos < sizeof(logbuf) - 1; ++i)
+        logbuf[pos++] = requested_buf[i];
+    const char *mid = ", created ";
+    for (size_t i = 0; mid[i] && pos < sizeof(logbuf) - 1; ++i)
+        logbuf[pos++] = mid[i];
+    for (size_t i = 0; spawned_buf[i] && pos < sizeof(logbuf) - 1; ++i)
+        logbuf[pos++] = spawned_buf[i];
+    logbuf[pos] = '\0';
+
+    klog_info(logbuf);
+}
+
+static void command_shutdown(void)
+{
+    vga_write_line("Shutdown: powering off...");
+    klog_info("shutdown: shell request");
+
+    /* Try common ACPI power-off ports used by popular emulators. */
+    outw(0x604, 0x2000);
+    outw(0xB004, 0x2000);
+    outw(0x4004, 0x3400);
+    outw(0x600, 0x2001);
+
+    __asm__ __volatile__("cli");
+    for (;;)
+        __asm__ __volatile__("hlt");
+}
+
 static void shell_execute(char *line)
 {
     line = (char *)skip_spaces(line);
@@ -443,6 +682,26 @@ static void shell_execute(char *line)
     else if (shell_str_equals(line, "gfx"))
     {
         command_gfx();
+    }
+    else if (shell_str_equals(line, "kdlg"))
+    {
+        command_kdlg();
+    }
+    else if (shell_str_equals(line, "kdlvl") || shell_str_starts_with(line, "kdlvl "))
+    {
+        command_kdlvl(line + 5);
+    }
+    else if (shell_str_equals(line, "proc_count"))
+    {
+        command_proc_count();
+    }
+    else if (shell_str_equals(line, "spawn") || shell_str_starts_with(line, "spawn "))
+    {
+        command_spawn(line + 5);
+    }
+    else if (shell_str_equals(line, "shutdown"))
+    {
+        command_shutdown();
     }
     else if (shell_str_equals(line, "echo") || shell_str_starts_with(line, "echo "))
     {
