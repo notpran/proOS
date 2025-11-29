@@ -8,6 +8,8 @@ HOST_CC := gcc
 CFLAGS := -ffreestanding -fno-stack-protector -fno-builtin -Wall -Wextra -Werror -std=gnu99 -m32 -I kernel
 LDFLAGS := -nostdlib -m elf_i386 -T kernel/link.ld
 
+.DEFAULT_GOAL := all
+
 STAGE1 := $(BUILD_DIR)/mbr.bin
 STAGE2 := $(BUILD_DIR)/stage2.bin
 KERNEL_ELF := $(BUILD_DIR)/kernel.elf
@@ -17,7 +19,17 @@ ISO_IMG := $(BUILD_DIR)/proos.iso
 FAT16_IMG_TOOL := $(BUILD_DIR)/fat16_image.exe
 FAT16_IMG := $(BUILD_DIR)/fat16.img
 FAT16_SECTORS := 128
-FAT16_OFFSET := 69
+STAGE2_SECTORS := 4
+KERNEL_SECTORS := 160
+KERNEL_OFFSET := 5
+FAT16_OFFSET := $(shell expr $(KERNEL_OFFSET) + $(KERNEL_SECTORS))
+
+IMG_SECTORS := 2880
+EMBEDDED_FONT := assets/font.bdf
+EMBEDDED_FONT_OBJ := $(BUILD_DIR)/embedded_font.o
+EMBEDDED_FONT_SYMBOL_BASE := $(subst /,_,$(subst .,_,$(EMBEDDED_FONT)))
+EMBEDDED_FONT_START := _binary_$(EMBEDDED_FONT_SYMBOL_BASE)_start
+EMBEDDED_FONT_END := _binary_$(EMBEDDED_FONT_SYMBOL_BASE)_end
 
 KERNEL_OBJS := $(BUILD_DIR)/crt0.o \
 			   $(BUILD_DIR)/context.o \
@@ -40,12 +52,18 @@ KERNEL_OBJS := $(BUILD_DIR)/crt0.o \
 			   $(BUILD_DIR)/shell.o \
 			   $(BUILD_DIR)/ramfs.o \
 			   $(BUILD_DIR)/user/init.o \
-			   $(BUILD_DIR)/user/echo_service.o
+			   $(BUILD_DIR)/user/echo_service.o \
+			   $(BUILD_DIR)/string.o
 
-IMG_SECTORS := 2880
-STAGE2_SECTORS := 4
-KERNEL_SECTORS := 64
-KERNEL_OFFSET := 5
+ifeq ($(wildcard $(EMBEDDED_FONT)),)
+$(info [make] embedded font $(EMBEDDED_FONT) not found; framebuffer console will use BIOS/PSF-on-disk fonts only)
+else
+CFLAGS += -DHAVE_EMBEDDED_FONT -DEMBEDDED_FONT_START=$(EMBEDDED_FONT_START) -DEMBEDDED_FONT_END=$(EMBEDDED_FONT_END)
+KERNEL_OBJS += $(EMBEDDED_FONT_OBJ)
+
+$(EMBEDDED_FONT_OBJ): $(EMBEDDED_FONT) | $(BUILD_DIR)
+	$(OBJCOPY) -I binary -O elf32-i386 -B i386 --rename-section .data=.rodata,alloc,load,readonly,data,contents $< $@
+endif
 
 .PHONY: all clean run-qemu iso
 
@@ -58,7 +76,7 @@ $(STAGE1): boot/mbr.asm | $(BUILD_DIR)
 	$(NASM) -f bin $< -o $@
 
 $(STAGE2): boot/stage2.asm | $(BUILD_DIR)
-	$(NASM) -f bin -DFAT16_SECTORS=$(FAT16_SECTORS) $< -o $@
+	$(NASM) -f bin -DSTAGE2_SECTORS=$(STAGE2_SECTORS) -DKERNEL_SECTORS=$(KERNEL_SECTORS) -DFAT16_SECTORS=$(FAT16_SECTORS) $< -o $@
 
 $(BUILD_DIR)/crt0.o: kernel/crt0.s | $(BUILD_DIR)
 	@mkdir -p $(dir $@)

@@ -80,38 +80,88 @@ start_stage2:
 ; Read CX sectors starting at sector AX (1-based) into ES:BX using INT 13h extensions
 ; Returns CF set on failure, clear on success.
 read_sectors:
+    push bp
     push ax
+    push bx
+    push cx
     push dx
     push si
+    push di
 
+    ; EDI: running physical destination address
+    xor edi, edi
+    mov di, bx
+    xor ebp, ebp
+    mov bp, es
+    shl ebp, 4
+    add edi, ebp
+
+    ; EAX: current LBA (0-based)
+    mov dx, ax
+    xor eax, eax
+    mov ax, dx
+    dec eax
+
+    ; EBX: remaining sector count
+    xor ebx, ebx
+    mov bx, cx
+
+.read_loop:
+    test ebx, ebx
+    jz .done
+
+    mov ecx, ebx
+    cmp ecx, 63
+    jbe .chunk_ready
+    mov ecx, 63
+
+.chunk_ready:
     mov word [dap_sector_count], cx
-    mov word [dap_buffer_offset], bx
-    mov word [dap_buffer_segment], es
 
-    dec ax
-    mov dx, 0
-    mov word [dap_lba_low], ax
+    mov edx, eax
+    mov word [dap_lba_low], dx
+    shr edx, 16
     mov word [dap_lba_low + 2], dx
-    mov word [dap_lba_high], dx
-    mov word [dap_lba_high + 2], dx
+    mov word [dap_lba_high], 0
+    mov word [dap_lba_high + 2], 0
+
+    mov edx, edi
+    mov bp, dx
+    and bp, 0x000F
+    mov word [dap_buffer_offset], bp
+    shr edx, 4
+    mov word [dap_buffer_segment], dx
 
     mov si, dap_packet
-    mov ah, 0x42
     mov dl, [boot_drive]
+    mov ah, 0x42
     int 0x13
     jc .error
 
-    pop si
-    pop dx
-    pop ax
+    sub ebx, ecx
+    add eax, ecx
+
+    mov edx, ecx
+    shl edx, 9
+    add edi, edx
+
+    jmp .read_loop
+
+.done:
     clc
-    ret
+    jmp .restore
 
 .error:
+    stc
+
+.restore:
+    pop di
     pop si
     pop dx
+    pop cx
+    pop bx
     pop ax
-    stc
+    pop bp
     ret
 
 get_bios_font:

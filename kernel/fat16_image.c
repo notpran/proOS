@@ -12,8 +12,10 @@
 #define FAT_SECTORS 1
 #define ROOT_DIR_SECTORS 4
 #define DATA_START (RESERVED_SECTORS + FAT_COUNT * FAT_SECTORS + ROOT_DIR_SECTORS)
-#define FONT_SOURCE_PRIMARY "font.psf"
-#define FONT_SOURCE_FALLBACK "assets/font.psf"
+#define FONT_SOURCE_PRIMARY "font.bdf"
+#define FONT_SOURCE_SECONDARY "assets/font.bdf"
+#define FONT_SOURCE_PSF "font.psf"
+#define FONT_SOURCE_PSF_FALLBACK "assets/font_256.psf"
 
 static uint8_t image[TOTAL_SECTORS * SECTOR_SIZE];
 static uint8_t *fat_area = NULL;
@@ -148,12 +150,27 @@ static void append_file(const char name[11], const uint8_t *data, uint32_t size)
     ++root_entries_used;
 }
 
-static uint8_t *load_font_file(uint32_t *size_out)
+struct font_source
 {
-    const char *paths[] = {FONT_SOURCE_PRIMARY, FONT_SOURCE_FALLBACK};
+    const char *path;
+    int is_bdf;
+};
+
+static uint8_t *load_font_file(uint32_t *size_out, int *is_bdf)
+{
+    static const struct font_source paths[] = {
+        {FONT_SOURCE_PRIMARY, 1},
+        {FONT_SOURCE_SECONDARY, 1},
+        {FONT_SOURCE_PSF, 0},
+        {FONT_SOURCE_PSF_FALLBACK, 0}
+    };
+
+    if (is_bdf)
+        *is_bdf = 0;
+
     for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i)
     {
-        FILE *f = fopen(paths[i], "rb");
+        FILE *f = fopen(paths[i].path, "rb");
         if (!f)
             continue;
 
@@ -187,7 +204,10 @@ static uint8_t *load_font_file(uint32_t *size_out)
         if (size_out)
             *size_out = (uint32_t)len;
 
-        printf("[fat16_image] embedded %s (%lu bytes)\n", paths[i], (unsigned long)len);
+        if (is_bdf)
+            *is_bdf = paths[i].is_bdf;
+
+        printf("[fat16_image] embedded %s (%lu bytes)\n", paths[i].path, (unsigned long)len);
         return buffer;
     }
 
@@ -203,11 +223,14 @@ static void build_image(void)
     append_file(readme_name, (const uint8_t *)readme_text, (uint32_t)strlen(readme_text));
 
     uint32_t font_size = 0;
-    uint8_t *font_data = load_font_file(&font_size);
+    int font_is_bdf = 0;
+    uint8_t *font_data = load_font_file(&font_size, &font_is_bdf);
     if (font_data && font_size > 0)
     {
-        static const char font_name[11] = {'F','O','N','T',' ',' ',' ',' ','P','S','F'};
-        append_file(font_name, font_data, font_size);
+        static const char font_psf_name[11] = {'F','O','N','T',' ',' ',' ',' ','P','S','F'};
+        static const char font_bdf_name[11] = {'F','O','N','T',' ',' ',' ',' ','B','D','F'};
+        const char *name = font_is_bdf ? font_bdf_name : font_psf_name;
+        append_file(name, font_data, font_size);
         free(font_data);
     }
 }
