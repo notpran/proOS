@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define SECTOR_SIZE 512
 #define TOTAL_SECTORS 128
@@ -150,6 +151,44 @@ static void append_file(const char name[11], const uint8_t *data, uint32_t size)
     ++root_entries_used;
 }
 
+static uint8_t *load_file(const char *path, uint32_t *size_out)
+{
+    if (size_out)
+        *size_out = 0;
+
+    if (!path)
+        return NULL;
+
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return NULL;
+    if (st.st_size <= 0)
+        return NULL;
+
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+
+    uint8_t *buffer = (uint8_t *)malloc((size_t)st.st_size);
+    if (!buffer)
+    {
+        fclose(f);
+        return NULL;
+    }
+
+    size_t read = fread(buffer, 1, (size_t)st.st_size, f);
+    fclose(f);
+    if (read != (size_t)st.st_size)
+    {
+        free(buffer);
+        return NULL;
+    }
+
+    if (size_out)
+        *size_out = (uint32_t)read;
+    return buffer;
+}
+
 struct font_source
 {
     const char *path;
@@ -232,6 +271,16 @@ static void build_image(void)
         const char *name = font_is_bdf ? font_bdf_name : font_psf_name;
         append_file(name, font_data, font_size);
         free(font_data);
+    }
+
+    uint32_t stub_size = 0;
+    uint8_t *stub_data = load_file("build/modules/stub.kmd", &stub_size);
+    if (stub_data && stub_size > 0)
+    {
+        static const char stub_name[11] = {'S','T','U','B',' ',' ',' ',' ','K','M','D'};
+        append_file(stub_name, stub_data, stub_size);
+        printf("[fat16_image] embedded build/modules/stub.kmd (%u bytes)\n", (unsigned)stub_size);
+        free(stub_data);
     }
 }
 

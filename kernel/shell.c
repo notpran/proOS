@@ -11,6 +11,8 @@
 #include "fat16.h"
 #include "gfx.h"
 #include "klog.h"
+#include "module.h"
+#include "memory.h"
 
 #define SHELL_PROMPT "proOS >> "
 #define INPUT_MAX 256
@@ -52,6 +54,31 @@ static int shell_str_equals(const char *a, const char *b)
             return 0;
     }
     return *a == *b;
+}
+
+static void buffer_append(char *dst, size_t *pos, size_t max, const char *text)
+{
+    if (!dst || !pos || !text || max == 0)
+        return;
+    while (*text && *pos < max - 1)
+    {
+        dst[*pos] = *text;
+        ++(*pos);
+        ++text;
+    }
+}
+
+static void strip_kmd_extension(char *name)
+{
+    if (!name)
+        return;
+    size_t len = str_len(name);
+    if (len >= 4)
+    {
+        char *ext = name + len - 4;
+        if (ext[0] == '.' && (ext[1] == 'k' || ext[1] == 'K') && (ext[2] == 'm' || ext[2] == 'M') && (ext[3] == 'd' || ext[3] == 'D'))
+            ext[0] = '\0';
+    }
 }
 
 static int shell_str_starts_with(const char *str, const char *prefix)
@@ -185,6 +212,7 @@ static void command_help(void)
     vga_write_line("  cat    - print file contents");
     vga_write_line("  lsfs   - list FAT16 files");
     vga_write_line("  catfs  - print FAT16 file");
+    vga_write_line("  mod    - module control (list/load/unload .kmd)");
     vga_write_line("  gfx    - draw compositor demo");
     vga_write_line("  kdlg   - show kernel log");
     vga_write_line("  kdlvl [lvl] - adjust log verbosity");
@@ -345,6 +373,238 @@ static void command_cat(const char *arg)
     }
 
     vga_write_line(data);
+}
+
+static void command_mod_list(void)
+{
+    const module_handle_t *handles[32];
+    size_t count = module_enumerate(handles, sizeof(handles) / sizeof(handles[0]));
+    if (count == 0)
+    {
+        vga_write_line("mod: no modules loaded");
+        return;
+    }
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        const module_handle_t *handle = handles[i];
+        if (!handle)
+            continue;
+
+        char index_buf[16];
+        write_u64((uint64_t)(i + 1u), index_buf);
+
+        char line[128];
+        size_t pos = 0;
+        buffer_append(line, &pos, sizeof(line), index_buf);
+        buffer_append(line, &pos, sizeof(line), ". ");
+        buffer_append(line, &pos, sizeof(line), handle->meta.name);
+        buffer_append(line, &pos, sizeof(line), " v");
+        buffer_append(line, &pos, sizeof(line), handle->meta.version);
+        buffer_append(line, &pos, sizeof(line), " (");
+        buffer_append(line, &pos, sizeof(line), handle->meta.active ? "active" : "inactive");
+        if (handle->meta.autostart)
+            buffer_append(line, &pos, sizeof(line), ",autostart");
+        if (handle->meta.builtin)
+            buffer_append(line, &pos, sizeof(line), ",builtin");
+        buffer_append(line, &pos, sizeof(line), ")");
+        line[pos] = '\0';
+        vga_write_line(line);
+    }
+}
+
+static int build_module_filename(const char *name, char *out, size_t out_size)
+{
+    if (!name || !out || out_size == 0)
+        return 0;
+
+    size_t len = 0;
+    while (name[len] && name[len] != ' ' && len + 1 < out_size)
+    {
+        out[len] = name[len];
+        ++len;
+    }
+    out[len] = '\0';
+
+    if (len == 0)
+        return 0;
+
+    int has_dot = 0;
+    for (size_t i = 0; i < len; ++i)
+    {
+        if (out[i] == '.')
+        {
+            has_dot = 1;
+            break;
+        }
+    }
+
+    if (!has_dot)
+    {
+        if (len + 4 >= out_size)
+            return 0;
+        out[len++] = '.';
+        out[len++] = 'k';
+        out[len++] = 'm';
+        out[len++] = 'd';
+        out[len] = '\0';
+    }
+
+    return 1;
+}
+
+static void command_mod_load(const char *args)
+{
+    const char *name_ptr = skip_spaces(args);
+    char module_name[MODULE_NAME_MAX];
+    size_t idx = 0;
+    while (name_ptr[idx] && name_ptr[idx] != ' ' && idx + 1 < sizeof(module_name))
+    {
+        module_name[idx] = name_ptr[idx];
+        ++idx;
+    }
+    module_name[idx] = '\0';
+
+    if (module_name[0] == '\0')
+    {
+        vga_write_line("Usage: mod load <module>");
+        return;
+    }
+
+    strip_kmd_extension(module_name);
+
+    if (module_find(module_name))
+    {
+        vga_write_line("mod: module already loaded");
+        return;
+    }
+
+    if (!fat16_ready())
+    {
+        vga_write_line("mod: FAT16 image unavailable");
+        return;
+    }
+
+    char filename[48];
+    if (!build_module_filename(module_name, filename, sizeof(filename)))
+    {
+        vga_write_line("mod: invalid module name");
+        return;
+    }
+
+    uint32_t file_size = 0;
+    if (fat16_file_size(filename, &file_size) < 0 || file_size == 0)
+    {
+        vga_write_line("mod: file not found on FAT16");
+        return;
+    }
+
+    uint8_t *buffer = (uint8_t *)kalloc(file_size);
+    if (!buffer)
+    {
+        vga_write_line("mod: out of memory");
+        return;
+    }
+
+    size_t read_size = 0;
+    if (fat16_read_file(filename, buffer, file_size, &read_size) < 0 || read_size != file_size)
+    {
+        vga_write_line("mod: failed to read module image");
+        return;
+    }
+
+    if (module_load_image(filename, buffer, file_size, 0) == 0)
+    {
+        vga_write("mod: loaded ");
+        vga_write_line(module_name);
+    }
+    else
+    {
+        vga_write_line("mod: load failed");
+    }
+}
+
+static void command_mod_unload(const char *args)
+{
+    const char *name_ptr = skip_spaces(args);
+    char module_name[MODULE_NAME_MAX];
+    size_t idx = 0;
+    while (name_ptr[idx] && name_ptr[idx] != ' ' && idx + 1 < sizeof(module_name))
+    {
+        module_name[idx] = name_ptr[idx];
+        ++idx;
+    }
+    module_name[idx] = '\0';
+
+    if (module_name[0] == '\0')
+    {
+        vga_write_line("Usage: mod unload <module>");
+        return;
+    }
+
+    strip_kmd_extension(module_name);
+
+    const module_handle_t *handle = module_find(module_name);
+    if (!handle)
+    {
+        vga_write_line("mod: module not loaded");
+        return;
+    }
+
+    if (handle->meta.builtin)
+    {
+        vga_write_line("mod: cannot unload builtin module");
+        return;
+    }
+
+    if (module_unload(module_name) == 0)
+    {
+        vga_write("mod: unloaded ");
+        vga_write_line(module_name);
+    }
+    else
+    {
+        vga_write_line("mod: unload failed");
+    }
+}
+
+static void command_mod(const char *args)
+{
+    const char *sub = skip_spaces(args);
+
+    if (*sub == '\0')
+    {
+        command_mod_list();
+        return;
+    }
+
+    char token[8];
+    size_t idx = 0;
+    while (sub[idx] && sub[idx] != ' ' && idx + 1 < sizeof(token))
+    {
+        token[idx] = sub[idx];
+        ++idx;
+    }
+    token[idx] = '\0';
+
+    const char *rest = skip_spaces(sub + idx);
+
+    if (shell_str_equals(token, "list"))
+    {
+        command_mod_list();
+    }
+    else if (shell_str_equals(token, "load"))
+    {
+        command_mod_load(rest);
+    }
+    else if (shell_str_equals(token, "unload"))
+    {
+        command_mod_unload(rest);
+    }
+    else
+    {
+        vga_write_line("Usage: mod [list|load <name>|unload <name>]");
+    }
 }
 
 static void command_proc_list(void)
@@ -678,6 +938,10 @@ static void shell_execute(char *line)
     else if (shell_str_equals(line, "lsfs"))
     {
         command_lsfs();
+    }
+    else if (shell_str_equals(line, "mod") || shell_str_starts_with(line, "mod "))
+    {
+        command_mod(line + 3);
     }
     else if (shell_str_equals(line, "gfx"))
     {

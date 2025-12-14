@@ -6,6 +6,7 @@ OBJCOPY := i686-elf-objcopy
 HOST_CC := gcc
 
 CFLAGS := -ffreestanding -fno-stack-protector -fno-builtin -Wall -Wextra -Werror -std=gnu99 -m32 -I kernel
+MODULE_CFLAGS := -ffreestanding -fno-stack-protector -fno-builtin -Wall -Wextra -Werror -std=gnu99 -m32 -I kernel -DMODULE_BUILD
 LDFLAGS := -nostdlib -m elf_i386 -T kernel/link.ld
 
 .DEFAULT_GOAL := all
@@ -20,7 +21,7 @@ FAT16_IMG_TOOL := $(BUILD_DIR)/fat16_image.exe
 FAT16_IMG := $(BUILD_DIR)/fat16.img
 FAT16_SECTORS := 128
 STAGE2_SECTORS := 4
-KERNEL_SECTORS := 160
+KERNEL_SECTORS := 256
 KERNEL_OFFSET := 5
 FAT16_OFFSET := $(shell expr $(KERNEL_OFFSET) + $(KERNEL_SECTORS))
 
@@ -32,29 +33,43 @@ EMBEDDED_FONT_START := _binary_$(EMBEDDED_FONT_SYMBOL_BASE)_start
 EMBEDDED_FONT_END := _binary_$(EMBEDDED_FONT_SYMBOL_BASE)_end
 
 KERNEL_OBJS := $(BUILD_DIR)/crt0.o \
-			   $(BUILD_DIR)/context.o \
-			   $(BUILD_DIR)/isr.o \
-			   $(BUILD_DIR)/irq.o \
-			   $(BUILD_DIR)/syscall_entry.o \
-			   $(BUILD_DIR)/idt.o \
-			   $(BUILD_DIR)/pic.o \
-			   $(BUILD_DIR)/pit.o \
-			   $(BUILD_DIR)/ipc.o \
-			   $(BUILD_DIR)/process.o \
-			   $(BUILD_DIR)/keyboard.o \
-			   $(BUILD_DIR)/syscall.o \
-			   $(BUILD_DIR)/kmain.o \
-			   $(BUILD_DIR)/klog.o \
-			   $(BUILD_DIR)/vga.o \
-			   $(BUILD_DIR)/memory.o \
-			   $(BUILD_DIR)/vbe.o \
-			   $(BUILD_DIR)/gfx.o \
-			   $(BUILD_DIR)/fat16.o \
-			   $(BUILD_DIR)/shell.o \
-			   $(BUILD_DIR)/ramfs.o \
-			   $(BUILD_DIR)/user/init.o \
-			   $(BUILD_DIR)/user/echo_service.o \
-			   $(BUILD_DIR)/string.o
+		   $(BUILD_DIR)/context.o \
+		   $(BUILD_DIR)/isr.o \
+		   $(BUILD_DIR)/irq.o \
+		   $(BUILD_DIR)/syscall_entry.o \
+		   $(BUILD_DIR)/idt.o \
+		   $(BUILD_DIR)/pic.o \
+		   $(BUILD_DIR)/pit.o \
+		   $(BUILD_DIR)/ipc.o \
+		   $(BUILD_DIR)/process.o \
+		   $(BUILD_DIR)/keyboard.o \
+		   $(BUILD_DIR)/syscall.o \
+		   $(BUILD_DIR)/kmain.o \
+		   $(BUILD_DIR)/klog.o \
+		   $(BUILD_DIR)/vga.o \
+		   $(BUILD_DIR)/memory.o \
+		   $(BUILD_DIR)/vbe.o \
+		   $(BUILD_DIR)/gfx.o \
+		   $(BUILD_DIR)/fat16.o \
+		   $(BUILD_DIR)/shell.o \
+		   $(BUILD_DIR)/ramfs.o \
+		   $(BUILD_DIR)/devmgr.o \
+		   $(BUILD_DIR)/user/init.o \
+		   $(BUILD_DIR)/user/echo_service.o \
+		   $(BUILD_DIR)/string.o \
+		   $(BUILD_DIR)/module.o \
+		   $(BUILD_DIR)/module_symbols.o
+
+MODULE_EXT := kmd
+MODULES := fs ps2kbd ps2mouse pit rtc biosdisk ata time
+MODULE_OBJS := $(addprefix $(BUILD_DIR)/modules/, $(addsuffix _module.o, $(MODULES)))
+MODULE_MODS := $(addprefix $(BUILD_DIR)/modules/, $(addsuffix .$(MODULE_EXT), $(MODULES)))
+MODULE_BLOBS := $(addprefix $(BUILD_DIR)/modules/, $(addsuffix _blob.o, $(MODULES)))
+
+KERNEL_OBJS += $(MODULE_BLOBS)
+
+DISK_MODULES := stub
+DISK_MODULE_MODS := $(addprefix $(BUILD_DIR)/modules/, $(addsuffix .$(MODULE_EXT), $(DISK_MODULES)))
 
 ifeq ($(wildcard $(EMBEDDED_FONT)),)
 $(info [make] embedded font $(EMBEDDED_FONT) not found; framebuffer console will use BIOS/PSF-on-disk fonts only)
@@ -95,6 +110,18 @@ $(BUILD_DIR)/%.o: kernel/%.c | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/modules:
+	@mkdir -p $(BUILD_DIR)/modules
+
+$(BUILD_DIR)/modules/%_module.o: modules/%_module.c | $(BUILD_DIR)/modules
+	$(CC) $(MODULE_CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/modules/%.$(MODULE_EXT): $(BUILD_DIR)/modules/%_module.o
+	$(LD) -r -o $@ $<
+
+$(BUILD_DIR)/modules/%_blob.o: $(BUILD_DIR)/modules/%.$(MODULE_EXT)
+	$(OBJCOPY) -I binary -O elf32-i386 -B i386 --rename-section .data=.rodata,alloc,load,readonly,data,contents $< $@
+
 $(KERNEL_ELF): $(KERNEL_OBJS) kernel/link.ld | $(BUILD_DIR)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o $@
 
@@ -104,7 +131,7 @@ $(KERNEL_BIN): $(KERNEL_ELF) | $(BUILD_DIR)
 $(FAT16_IMG_TOOL): kernel/fat16_image.c | $(BUILD_DIR)
 	$(HOST_CC) -DFAT16_IMAGE_STANDALONE -o $@ $<
 
-$(FAT16_IMG): $(FAT16_IMG_TOOL) | $(BUILD_DIR)
+$(FAT16_IMG): $(FAT16_IMG_TOOL) $(DISK_MODULE_MODS) | $(BUILD_DIR)
 	$< $@
 
 $(DISK_IMG): $(STAGE1) $(STAGE2) $(KERNEL_BIN) $(FAT16_IMG) | $(BUILD_DIR)

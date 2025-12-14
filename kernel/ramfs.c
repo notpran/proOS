@@ -153,3 +153,44 @@ int ramfs_write(const char *name, const char *data, size_t length)
     file->data[file->size] = '\0';
     return (int)length;
 }
+
+int ramfs_write_file(const char *name, const char *data, size_t length)
+{
+    if (!name)
+        return -1;
+
+    struct ramfs_entry *file = create_file(name);
+    if (!file)
+        return -1;
+
+    if (!data)
+    {
+        file->size = 0;
+        file->data[0] = '\0';
+        return 0;
+    }
+
+    if (length >= RAMFS_MAX_FILE_SIZE)
+        length = RAMFS_MAX_FILE_SIZE - 1;
+
+    mem_copy(file->data, data, length);
+    file->size = length;
+    file->data[file->size] = '\0';
+    return (int)length;
+}
+
+int ramfs_remove(const char *name)
+{
+    if (!name)
+        return -1;
+
+    struct ramfs_entry *file = find_file(name);
+    if (!file)
+        return -1;
+
+    file->used = 0;
+    file->size = 0;
+    file->name[0] = '\0';
+    file->data[0] = '\0';
+    return 0;
+}

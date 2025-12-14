@@ -4,8 +4,6 @@
 #include "ramfs.h"
 #include "interrupts.h"
 #include "pic.h"
-#include "pit.h"
-#include "keyboard.h"
 #include "proc.h"
 #include "syscall.h"
 #include "memory.h"
@@ -13,6 +11,8 @@
 #include "fat16.h"
 #include "gfx.h"
 #include "klog.h"
+#include "module.h"
+#include "devmgr.h"
 
 extern void shell_run(void);
 extern void user_init(void);
@@ -30,12 +30,12 @@ static void print_banner(void)
 
 void kmain(void)
 {
+    memory_init();
     vbe_init();
     vga_init();
     vga_clear();
     klog_init();
     klog_info("kernel: video initialized");
-    memory_init();
     klog_info("kernel: memory initialized");
     ramfs_init();
     klog_info("kernel: ramfs ready");
@@ -49,8 +49,7 @@ void kmain(void)
 
     if (fat_ok)
     {
-        vbe_try_load_font_from_fat();
-        klog_info("kernel: FAT16 font loaded");
+        klog_info("kernel: FAT16 image mounted");
     }
     else
     {
@@ -61,10 +60,10 @@ void kmain(void)
     klog_info("kernel: IDT configured");
     pic_init();
     klog_info("kernel: PIC configured");
-    pit_init(100);
-    klog_info("kernel: PIT started");
-    kb_init();
-    klog_info("kernel: keyboard ready");
+    devmgr_init();
+    klog_info("kernel: device manager ready");
+    module_system_init();
+    klog_info("kernel: module system online");
     process_system_init();
     klog_info("kernel: process system initialized");
     syscall_init();

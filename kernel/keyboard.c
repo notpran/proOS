@@ -2,6 +2,7 @@
 #include "interrupts.h"
 #include "io.h"
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define KB_DATA_PORT 0x60
@@ -29,6 +30,29 @@ static const char keymap_shift[128] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
+
+static char hex_digit(uint8_t value)
+{
+    value &= 0x0F;
+    if (value < 10)
+        return (char)('0' + value);
+    return (char)('A' + (value - 10));
+}
+
+static char display_char(char c)
+{
+    if (c == 0)
+        return '-';
+    if (c == '\n')
+        return 'N';
+    if (c == '\t')
+        return 'T';
+    if (c == '\b')
+        return 'B';
+    if (c >= 32 && c < 127)
+        return c;
+    return '?';
+}
 
 static void buffer_push(char c)
 {
@@ -106,4 +130,41 @@ char kb_getchar(void)
     char c = buffer[tail];
     tail = (tail + 1U) % KB_BUFFER_SIZE;
     return c;
+}
+
+int kb_dump_layout(char *out, size_t max_len)
+{
+    if (!out || max_len == 0)
+        return -1;
+
+    size_t pos = 0;
+
+    for (int scancode = 0; scancode < 128; ++scancode)
+    {
+        char lower = keymap[scancode];
+        char upper = keymap_shift[scancode];
+        if (!lower && !upper)
+            continue;
+
+        if (pos + 10 >= max_len)
+            break;
+
+        out[pos++] = '0';
+        out[pos++] = 'x';
+        out[pos++] = hex_digit((uint8_t)(scancode >> 4));
+        out[pos++] = hex_digit((uint8_t)scancode);
+        out[pos++] = ':';
+        out[pos++] = ' ';
+        out[pos++] = display_char(lower);
+        out[pos++] = ' ';
+        out[pos++] = display_char(upper);
+        if (pos + 1 >= max_len)
+            break;
+        out[pos++] = '\n';
+    }
+
+    if (pos >= max_len)
+        pos = max_len - 1;
+    out[pos] = '\0';
+    return (int)pos;
 }
