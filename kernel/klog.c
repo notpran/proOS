@@ -1,10 +1,20 @@
+#define KLOG_TAG "klog"
+
 #include "klog.h"
 #include "string.h"
 #include "ipc.h"
+#include "vfs.h"
 
 #ifndef CONFIG_KLOG_CAPACITY
 #error "CONFIG_KLOG_CAPACITY must be defined in config.h"
 #endif
+
+struct klog_module_entry
+{
+    int used;
+    int level;
+    char name[CONFIG_KLOG_MODULE_NAME_LEN];
+};
 
 static struct klog_entry klog_buffer[CONFIG_KLOG_CAPACITY];
 static size_t klog_count = 0;
@@ -13,6 +23,9 @@ static uint32_t klog_sequence = 0;
 static int klog_current_level = CONFIG_KLOG_DEFAULT_LEVEL;
 static int klog_ready = 0;
 static int logger_channel_id = -1;
+static struct klog_module_entry module_table[CONFIG_KLOG_MAX_MODULES];
+static int proc_sink_enabled = 0;
+static int proc_sink_guard = 0;
 
 static uint32_t save_and_cli(void)
 {
@@ -26,13 +39,55 @@ static void restore_flags(uint32_t flags)
     __asm__ __volatile__("push %0\n\tpopf" :: "r"(flags) : "memory", "cc");
 }
 
+static size_t string_copy(char *dst, size_t cap, const char *src)
+{
+    if (!dst || cap == 0)
+        return 0;
+    size_t i = 0;
+    if (src)
+    {
+        while (src[i] && i + 1 < cap)
+        {
+            dst[i] = src[i];
+            ++i;
+        }
+    }
+    dst[i] = '\0';
+    return i;
+}
+
+static int string_equals(const char *a, const char *b)
+{
+    if (!a || !b)
+        return 0;
+    size_t idx = 0;
+    while (a[idx] && b[idx])
+    {
+        if (a[idx] != b[idx])
+            return 0;
+        ++idx;
+    }
+    return a[idx] == b[idx];
+}
+
 static void klog_reset_internal(void)
 {
     klog_count = 0;
     klog_head = 0;
     klog_sequence = 0;
     for (size_t i = 0; i < CONFIG_KLOG_CAPACITY; ++i)
+    {
+        klog_buffer[i].seq = 0;
+        klog_buffer[i].level = KLOG_INFO;
+        klog_buffer[i].module[0] = '\0';
         klog_buffer[i].text[0] = '\0';
+    }
+    for (size_t i = 0; i < CONFIG_KLOG_MAX_MODULES; ++i)
+    {
+        module_table[i].used = 0;
+        module_table[i].level = KLOG_LEVEL_INHERIT;
+        module_table[i].name[0] = '\0';
+    }
 }
 
 void klog_init(void)
@@ -59,10 +114,11 @@ struct klog_ipc_event
     uint32_t seq;
     uint8_t level;
     uint8_t reserved[3];
+    char module[CONFIG_KLOG_MODULE_NAME_LEN];
     char text[CONFIG_KLOG_ENTRY_LEN];
 };
 
-static void klog_publish_channel(uint32_t seq, uint8_t level, const char *text)
+static void klog_publish_channel(uint32_t seq, uint8_t level, const char *module, const char *text)
 {
     if (!ipc_is_initialized() || !text)
         return;
@@ -75,6 +131,7 @@ static void klog_publish_channel(uint32_t seq, uint8_t level, const char *text)
     payload.seq = seq;
     payload.level = level;
     payload.reserved[0] = payload.reserved[1] = payload.reserved[2] = 0;
+    string_copy(payload.module, sizeof(payload.module), module);
 
     size_t i = 0;
     while (text[i] && i + 1 < sizeof(payload.text))
@@ -85,6 +142,51 @@ static void klog_publish_channel(uint32_t seq, uint8_t level, const char *text)
     payload.text[i] = '\0';
 
     ipc_channel_send(logger_channel_id, 0, level, 0, &payload, sizeof(payload), 0);
+}
+
+static const char *sanitize_module(const char *module)
+{
+    if (!module || module[0] == '\0')
+        return "kernel";
+    return module;
+}
+
+static struct klog_module_entry *find_module_entry(const char *module, int allocate)
+{
+    const char *tag = sanitize_module(module);
+    for (size_t i = 0; i < CONFIG_KLOG_MAX_MODULES; ++i)
+    {
+        if (!module_table[i].used)
+            continue;
+        if (string_equals(module_table[i].name, tag))
+            return &module_table[i];
+    }
+
+    if (!allocate)
+        return NULL;
+
+    for (size_t i = 0; i < CONFIG_KLOG_MAX_MODULES; ++i)
+    {
+        if (module_table[i].used)
+            continue;
+        module_table[i].used = 1;
+        module_table[i].level = KLOG_LEVEL_INHERIT;
+        string_copy(module_table[i].name, sizeof(module_table[i].name), tag);
+        return &module_table[i];
+    }
+
+    return NULL;
+}
+
+static int effective_threshold_for(const char *module)
+{
+    int threshold = klog_current_level;
+    uint32_t flags = save_and_cli();
+    struct klog_module_entry *entry = find_module_entry(module, 0);
+    if (entry && entry->level != KLOG_LEVEL_INHERIT)
+        threshold = entry->level;
+    restore_flags(flags);
+    return threshold;
 }
 
 void klog_set_level(int level)
@@ -106,41 +208,191 @@ int klog_get_level(void)
     return klog_current_level;
 }
 
-void klog_emit(int level, const char *message)
+int klog_module_set_level(const char *module, int level)
 {
     ensure_ready();
-    if (!message)
-        return;
-    if (level < klog_current_level)
-        return;
+    const char *tag = sanitize_module(module);
+    if (level != KLOG_LEVEL_INHERIT)
+    {
+        if (level < KLOG_DEBUG)
+            level = KLOG_DEBUG;
+        if (level > KLOG_ERROR)
+            level = KLOG_ERROR;
+    }
 
     uint32_t flags = save_and_cli();
+    struct klog_module_entry *entry = find_module_entry(tag, 1);
+    if (!entry)
+    {
+        restore_flags(flags);
+        return -1;
+    }
+    entry->level = level;
+    restore_flags(flags);
+    if (proc_sink_enabled)
+        klog_refresh_proc_sink();
+    return 0;
+}
 
+int klog_module_get_level(const char *module)
+{
+    ensure_ready();
+    uint32_t flags = save_and_cli();
+    struct klog_module_entry *entry = find_module_entry(module, 0);
+    int level = entry ? entry->level : KLOG_LEVEL_INHERIT;
+    restore_flags(flags);
+    return level;
+}
+
+static void klog_store_entry(const char *module, int level, const char *message, uint32_t seq_value, char *scratch_text, char *scratch_module)
+{
     struct klog_entry *slot = &klog_buffer[klog_head];
-    uint32_t seq_value = klog_sequence++;
     slot->seq = seq_value;
-    uint8_t stored_level = (uint8_t)((level >= KLOG_DEBUG && level <= KLOG_ERROR) ? level : KLOG_ERROR);
-    slot->level = stored_level;
-
-    char text_copy[CONFIG_KLOG_ENTRY_LEN];
+    slot->level = (uint8_t)level;
+    string_copy(slot->module, sizeof(slot->module), module);
 
     size_t i = 0;
     while (message[i] && i + 1 < CONFIG_KLOG_ENTRY_LEN)
     {
         slot->text[i] = message[i];
-        text_copy[i] = message[i];
         ++i;
     }
     slot->text[i] = '\0';
-    text_copy[i] = '\0';
+
+    if (scratch_text)
+        string_copy(scratch_text, CONFIG_KLOG_ENTRY_LEN, slot->text);
+    if (scratch_module)
+        string_copy(scratch_module, CONFIG_KLOG_MODULE_NAME_LEN, slot->module);
 
     klog_head = (klog_head + 1U) % CONFIG_KLOG_CAPACITY;
     if (klog_count < CONFIG_KLOG_CAPACITY)
         ++klog_count;
+}
 
+static void append_char(char *dst, size_t *pos, size_t cap, char ch)
+{
+    if (*pos + 1 >= cap)
+        return;
+    dst[*pos] = ch;
+    ++(*pos);
+}
+
+static void append_text(char *dst, size_t *pos, size_t cap, const char *text)
+{
+    if (!text)
+        return;
+    size_t i = 0;
+    while (text[i] && *pos + 1 < cap)
+    {
+        dst[*pos] = text[i];
+        ++(*pos);
+        ++i;
+    }
+}
+
+static void append_u32(char *dst, size_t *pos, size_t cap, uint32_t value)
+{
+    char tmp[12];
+    size_t idx = 0;
+    if (value == 0)
+    {
+        tmp[idx++] = '0';
+    }
+    else
+    {
+        while (value > 0 && idx < sizeof(tmp))
+        {
+            tmp[idx++] = (char)('0' + (value % 10U));
+            value /= 10U;
+        }
+    }
+    while (idx > 0 && *pos + 1 < cap)
+    {
+        dst[*pos] = tmp[--idx];
+        ++(*pos);
+    }
+}
+
+static void append_level_name(char *dst, size_t *pos, size_t cap, uint8_t level)
+{
+    const char *name = klog_level_name(level);
+    append_text(dst, pos, cap, name);
+}
+
+void klog_refresh_proc_sink(void)
+{
+    if (!proc_sink_enabled)
+        return;
+    if (proc_sink_guard)
+        return;
+
+    proc_sink_guard = 1;
+
+    struct klog_entry entries[CONFIG_KLOG_CAPACITY];
+    size_t count = klog_copy(entries, CONFIG_KLOG_CAPACITY);
+
+    vfs_write_file("/proc/log", NULL, 0);
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        char line[CONFIG_KLOG_ENTRY_LEN + CONFIG_KLOG_MODULE_NAME_LEN + 48];
+        size_t pos = 0;
+        append_char(line, &pos, sizeof(line), '[');
+        append_u32(line, &pos, sizeof(line), entries[i].seq);
+        append_char(line, &pos, sizeof(line), ']');
+        append_char(line, &pos, sizeof(line), ' ');
+        append_level_name(line, &pos, sizeof(line), entries[i].level);
+        append_char(line, &pos, sizeof(line), ' ');
+        append_char(line, &pos, sizeof(line), '(');
+        append_text(line, &pos, sizeof(line), entries[i].module);
+        append_char(line, &pos, sizeof(line), ')');
+        append_char(line, &pos, sizeof(line), ':');
+        append_char(line, &pos, sizeof(line), ' ');
+        append_text(line, &pos, sizeof(line), entries[i].text);
+        line[pos] = '\0';
+        vfs_write("/proc/log", line, pos);
+        vfs_write("/proc/log", "\n", 1);
+    }
+
+    proc_sink_guard = 0;
+}
+
+void klog_enable_proc_sink(void)
+{
+    proc_sink_enabled = 1;
+    klog_refresh_proc_sink();
+}
+
+void klog_emit(int level, const char *message)
+{
+    klog_emit_tagged(KLOG_DEFAULT_TAG, level, message);
+}
+
+void klog_emit_tagged(const char *module, int level, const char *message)
+{
+    ensure_ready();
+    if (!message)
+        return;
+
+    const char *tag = sanitize_module(module);
+    int threshold = effective_threshold_for(tag);
+    if (level < threshold)
+        return;
+    if (level < KLOG_DEBUG)
+        level = KLOG_DEBUG;
+    if (level > KLOG_ERROR)
+        level = KLOG_ERROR;
+
+    uint32_t flags = save_and_cli();
+    uint32_t seq_value = klog_sequence++;
+    char text_copy[CONFIG_KLOG_ENTRY_LEN];
+    char module_copy[CONFIG_KLOG_MODULE_NAME_LEN];
+    klog_store_entry(tag, level, message, seq_value, text_copy, module_copy);
     restore_flags(flags);
 
-    klog_publish_channel(seq_value, stored_level, text_copy);
+    klog_publish_channel(seq_value, (uint8_t)level, module_copy, text_copy);
+    if (proc_sink_enabled)
+        klog_refresh_proc_sink();
 }
 
 size_t klog_copy(struct klog_entry *out, size_t max_entries)

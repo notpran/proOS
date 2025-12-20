@@ -15,6 +15,7 @@
 
 static const struct kernel_symbol builtin_symbols[] = {
     { "klog_emit", (uintptr_t)&klog_emit },
+    { "klog_emit_tagged", (uintptr_t)&klog_emit_tagged },
     { "ramfs_write", (uintptr_t)&ramfs_write },
     { "ramfs_read", (uintptr_t)&ramfs_read },
     { "ramfs_write_file", (uintptr_t)&ramfs_write_file },

@@ -3,6 +3,7 @@
 #include "vga.h"
 #include "klog.h"
 #include "pit.h"
+#include "debug.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -592,13 +593,19 @@ struct process *process_lookup(int pid)
 int process_create(void (*entry)(void), size_t stack_size)
 {
 	struct process *proc = scheduler_create_thread(entry, stack_size, THREAD_KIND_USER, scheduler_default_user_priority(), 1, 0);
-	return proc ? proc->pid : -1;
+	int pid = proc ? proc->pid : -1;
+	if (pid > 0)
+		debug_publish_task_list();
+	return pid;
 }
 
 int process_create_kernel(void (*entry)(void), size_t stack_size)
 {
 	struct process *proc = scheduler_create_thread(entry, stack_size, THREAD_KIND_KERNEL, scheduler_default_kernel_priority(), 1, 0);
-	return proc ? proc->pid : -1;
+	int pid = proc ? proc->pid : -1;
+	if (pid > 0)
+		debug_publish_task_list();
+	return pid;
 }
 
 struct process *process_current(void)
@@ -677,6 +684,7 @@ void process_exit(int code)
 	proc->state = PROC_ZOMBIE;
 	log_process_event("process: exit pid ", proc->pid);
 	scheduler_send_event(SCHED_EVENT_EXIT, proc->pid, code, proc->state);
+	debug_publish_task_list();
 	context_switch(&proc->ctx, &scheduler_ctx);
 
 	for (;;)
@@ -711,6 +719,7 @@ void process_schedule(void)
 			reclaim_zombie(finished);
 			if (pid > 0)
 				log_process_event("process: reclaimed pid ", pid);
+			debug_publish_task_list();
 		}
 
 		if (finished && finished->state == PROC_READY && finished != idle_process && !finished->on_run_queue)
@@ -731,6 +740,34 @@ int process_count(void)
 	return total;
 }
 
+size_t process_snapshot(struct process_info *out, size_t max_entries)
+{
+	if (!out || max_entries == 0)
+		return 0;
+
+	size_t count = 0;
+	for (int i = 0; i < MAX_PROCS && count < max_entries; ++i)
+	{
+		struct process *proc = &processes[i];
+		if (proc->state == PROC_UNUSED || proc->pid <= 0)
+			continue;
+
+		struct process_info *slot = &out[count++];
+		slot->pid = proc->pid;
+		slot->state = proc->state;
+		slot->kind = proc->kind;
+		slot->base_priority = proc->base_priority;
+		slot->dynamic_priority = proc->dynamic_priority;
+		slot->time_slice_remaining = proc->time_slice_remaining;
+		slot->time_slice_ticks = proc->time_slice_ticks;
+		slot->wake_deadline = proc->wake_deadline;
+		slot->stack_pointer = proc->ctx.esp;
+		slot->stack_size = proc->stack_size;
+	}
+
+	return count;
+}
+
 void process_debug_list(void)
 {
 	static const char *state_names[] = {
@@ -741,27 +778,36 @@ void process_debug_list(void)
 		"ZOMBIE"
 	};
 
-	vga_write_line("PID  STATE   PRIO");
-	for (int i = 0; i < MAX_PROCS; ++i)
+	struct process_info snapshot[MAX_PROCS];
+	size_t count = process_snapshot(snapshot, MAX_PROCS);
+	vga_write_line("PID  STATE    KIND  PRI(base/dyn)  REM  TICKS");
+	for (size_t i = 0; i < count; ++i)
 	{
-		if (processes[i].state == PROC_UNUSED || processes[i].pid <= 0)
-			continue;
-
-		char buffer[48];
-		int pid = processes[i].pid;
-		const char *state = state_names[processes[i].state];
-
-		int idx = int_to_string(pid, buffer);
+		const struct process_info *info = &snapshot[i];
+		const char *state = state_names[info->state];
+		char buffer[80];
+		int idx = int_to_string(info->pid, buffer);
+		while (idx < 4)
+			buffer[idx++] = ' ';
 		buffer[idx++] = ' ';
-		buffer[idx++] = ' ';
-		for (int j = 0; state[j] && idx < (int)(sizeof(buffer) - 2); ++j)
+		for (int j = 0; state[j] && idx < (int)(sizeof(buffer) - 1); ++j)
 			buffer[idx++] = state[j];
 		while (idx < 12)
 			buffer[idx++] = ' ';
 		buffer[idx++] = ' ';
-		buffer[idx++] = (char)('0' + processes[i].dynamic_priority);
+		buffer[idx++] = (info->kind == THREAD_KIND_USER) ? 'U' : 'K';
+		buffer[idx++] = ' ';
+		buffer[idx++] = ' ';
+		idx += int_to_string((int)info->base_priority, buffer + idx);
+		buffer[idx++] = '/';
+		idx += int_to_string((int)info->dynamic_priority, buffer + idx);
+		buffer[idx++] = ' ';
+		buffer[idx++] = ' ';
+		idx += int_to_string((int)info->time_slice_remaining, buffer + idx);
+		buffer[idx++] = ' ';
+		buffer[idx++] = ' ';
+		idx += int_to_string((int)info->time_slice_ticks, buffer + idx);
 		buffer[idx] = '\0';
-
 		vga_write_line(buffer);
 	}
 }

@@ -3,6 +3,7 @@
 #include "klog.h"
 #include "vfs.h"
 #include "ipc.h"
+#include "debug.h"
 
 #include <stddef.h>
 
@@ -329,6 +330,8 @@ void devmgr_refresh_ramfs(void)
 
     if (vfs_write_file("/dev/devices", listing, pos) < 0)
         klog_warn("devmgr: failed to publish device tree");
+
+    debug_publish_device_list();
 }
 
 static struct device_node *create_internal_device(const char *name, const char *type, struct device_node *parent)

@@ -13,6 +13,8 @@
 #include "klog.h"
 #include "module.h"
 #include "memory.h"
+#include "devmgr.h"
+#include "debug.h"
 #include "vbe.h"
 
 #define SHELL_PROMPT "proOS >> "
@@ -217,6 +219,73 @@ static void write_u64(uint64_t value, char *out)
     out[index] = '\0';
 }
 
+static void write_hex32(uint32_t value, char *out)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    out[0] = '0';
+    out[1] = 'x';
+    for (int i = 0; i < 8; ++i)
+    {
+        unsigned nibble = (value >> ((7 - i) * 4)) & 0xFu;
+        out[2 + i] = digits[nibble];
+    }
+    out[10] = '\0';
+}
+
+static void write_byte_hex(uint8_t value, char *out)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    out[0] = digits[(value >> 4) & 0xFu];
+    out[1] = digits[value & 0xFu];
+    out[2] = '\0';
+}
+
+static int parse_u32_token(const char *text, uint32_t *out_value)
+{
+    if (!text || !out_value || *text == '\0')
+        return 0;
+
+    uint32_t value = 0;
+
+    if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+    {
+        text += 2;
+        if (*text == '\0')
+            return 0;
+        while (*text)
+        {
+            char c = *text++;
+            uint32_t digit;
+            if (c >= '0' && c <= '9')
+                digit = (uint32_t)(c - '0');
+            else if (c >= 'a' && c <= 'f')
+                digit = 10u + (uint32_t)(c - 'a');
+            else if (c >= 'A' && c <= 'F')
+                digit = 10u + (uint32_t)(c - 'A');
+            else
+                return 0;
+            value = (value << 4) | digit;
+        }
+    }
+    else
+    {
+        while (*text)
+        {
+            char c = *text++;
+            if (c < '0' || c > '9')
+                return 0;
+            uint32_t digit = (uint32_t)(c - '0');
+            uint32_t next = value * 10u + digit;
+            if (next < value)
+                return 0;
+            value = next;
+        }
+    }
+
+    *out_value = value;
+    return 1;
+}
+
 static void write_hex_ptr(uintptr_t value, char *out)
 {
     static const char digits[] = "0123456789ABCDEF";
@@ -290,6 +359,7 @@ static void command_help(void)
     vga_write_line("  clear  - clear the screen");
     vga_write_line("  echo   - echo text or redirect");
     vga_write_line("  mem    - memory + uptime info");
+    vga_write_line("  memdump <addr> [len] - hex dump memory");
     vga_write_line("  reboot - reset the machine");
     vga_write_line("  ls     - list RAMFS files");
     vga_write_line("  cat    - print file contents");
@@ -299,10 +369,11 @@ static void command_help(void)
     vga_write_line("  gfx    - draw compositor demo");
     vga_write_line("  kdlg   - show kernel log");
     vga_write_line("  kdlvl [lvl] - adjust log verbosity");
+    vga_write_line("  tasks  - list processes");
     vga_write_line("  proc_count - show active process count");
     vga_write_line("  spawn <n> - stress process creation");
+    vga_write_line("  devs   - list devices");
     vga_write_line("  shutdown - power off the system");
-    vga_write_line("  proc_list - list processes");
 }
 
 static void command_clear(void)
@@ -376,6 +447,7 @@ static void command_echo(char *args)
 
 static void command_mem(void)
 {
+    debug_publish_memory_info();
     vga_write_line("Memory info:");
     print_ptr_line("heap base", memory_heap_base());
     print_ptr_line("heap limit", memory_heap_limit());
@@ -756,7 +828,184 @@ static void command_mod(const char *args)
 
 static void command_proc_list(void)
 {
+    debug_publish_task_list();
     process_debug_list();
+}
+
+static void format_device_flags(uint32_t flags, char *out)
+{
+    size_t idx = 0;
+    out[idx++] = '[';
+    if (flags & DEVICE_FLAG_PUBLISH)
+        out[idx++] = 'P';
+    if (flags & DEVICE_FLAG_INTERNAL)
+        out[idx++] = 'I';
+    out[idx++] = ']';
+    out[idx] = '\0';
+}
+
+static void command_devlist(void)
+{
+    debug_publish_device_list();
+
+    const struct device_node *nodes[DEVMGR_MAX_DEVICES];
+    size_t count = devmgr_enumerate(nodes, DEVMGR_MAX_DEVICES);
+    if (count == 0)
+    {
+        vga_write_line("(no devices)");
+        return;
+    }
+
+    vga_write_line("ID  NAME         TYPE                FLAGS PARENT");
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        const struct device_node *node = nodes[i];
+        char id_buf[16];
+        char flags_buf[8];
+        write_u64((uint64_t)node->id, id_buf);
+        format_device_flags(node->flags, flags_buf);
+
+        char line[128];
+        size_t pos = 0;
+
+        for (size_t j = 0; id_buf[j] && pos < sizeof(line) - 1; ++j)
+            line[pos++] = id_buf[j];
+        while (pos < 4)
+            line[pos++] = ' ';
+        line[pos++] = ' ';
+
+        const char *name = node->name;
+        for (size_t j = 0; name[j] && pos < sizeof(line) - 1; ++j)
+            line[pos++] = name[j];
+        while (pos < 18)
+            line[pos++] = ' ';
+
+        const char *type = node->type;
+        for (size_t j = 0; type[j] && pos < sizeof(line) - 1; ++j)
+            line[pos++] = type[j];
+        while (pos < 36)
+            line[pos++] = ' ';
+
+        for (size_t j = 0; flags_buf[j] && pos < sizeof(line) - 1; ++j)
+            line[pos++] = flags_buf[j];
+        line[pos++] = ' ';
+
+        const char *parent = (node->parent) ? node->parent->name : "-";
+        for (size_t j = 0; parent[j] && pos < sizeof(line) - 1; ++j)
+            line[pos++] = parent[j];
+
+        line[pos] = '\0';
+        vga_write_line(line);
+    }
+}
+
+static void command_memdump(const char *args)
+{
+    const char *cursor = skip_spaces(args);
+    if (*cursor == '\0')
+    {
+        vga_write_line("Usage: memdump <addr> [len]");
+        return;
+    }
+
+    char address_token[32];
+    size_t idx = 0;
+    while (cursor[idx] && cursor[idx] != ' ' && idx + 1 < sizeof(address_token))
+    {
+        address_token[idx] = cursor[idx];
+        ++idx;
+    }
+    address_token[idx] = '\0';
+
+    uint32_t address = 0;
+    if (!parse_u32_token(address_token, &address))
+    {
+        vga_write_line("memdump: invalid address");
+        return;
+    }
+
+    const char *len_ptr = skip_spaces(cursor + idx);
+    uint32_t length = 0;
+    if (*len_ptr)
+    {
+        char length_token[16];
+        size_t len_idx = 0;
+        while (len_ptr[len_idx] && len_ptr[len_idx] != ' ' && len_idx + 1 < sizeof(length_token))
+        {
+            length_token[len_idx] = len_ptr[len_idx];
+            ++len_idx;
+        }
+        length_token[len_idx] = '\0';
+        if (!parse_u32_token(length_token, &length) || length == 0)
+        {
+            vga_write_line("memdump: invalid length");
+            return;
+        }
+    }
+    else
+    {
+        length = 128;
+    }
+
+    if (length > 512)
+        length = 512;
+
+    const uint8_t *ptr = (const uint8_t *)(uintptr_t)address;
+
+    char line[96];
+    for (uint32_t offset = 0; offset < length; offset += 16)
+    {
+        size_t pos = 0;
+        uint32_t addr = address + offset;
+        char addr_hex[11];
+        write_hex32(addr, addr_hex);
+        for (size_t j = 0; addr_hex[j] && pos < sizeof(line) - 1; ++j)
+            line[pos++] = addr_hex[j];
+        line[pos++] = ':';
+        line[pos++] = ' ';
+
+        for (int i = 0; i < 16; ++i)
+        {
+            if (offset + (uint32_t)i < length)
+            {
+                char byte_hex[3];
+                write_byte_hex(ptr[offset + (uint32_t)i], byte_hex);
+                if (pos + 2 >= sizeof(line))
+                    break;
+                line[pos++] = byte_hex[0];
+                line[pos++] = byte_hex[1];
+            }
+            else
+            {
+                if (pos + 2 >= sizeof(line))
+                    break;
+                line[pos++] = ' ';
+                line[pos++] = ' ';
+            }
+            if (pos < sizeof(line) - 1)
+                line[pos++] = ' ';
+        }
+
+        line[pos++] = ' ';
+        line[pos++] = '|';
+        for (int i = 0; i < 16 && pos < sizeof(line) - 1; ++i)
+        {
+            if (offset + (uint32_t)i >= length)
+            {
+                line[pos++] = ' ';
+                continue;
+            }
+            uint8_t c = ptr[offset + (uint32_t)i];
+            if (c < 32 || c > 126)
+                c = '.';
+            line[pos++] = (char)c;
+        }
+        if (pos < sizeof(line) - 1)
+            line[pos++] = '|';
+        line[pos] = '\0';
+        vga_write_line(line);
+    }
 }
 
 static void command_lsfs(void)
@@ -866,8 +1115,9 @@ static void command_kdlg(void)
 
         const char *level = klog_level_name(entries[i].level);
         const char *text = entries[i].text;
+        const char *module = entries[i].module[0] ? entries[i].module : "kernel";
 
-        char line[CONFIG_KLOG_ENTRY_LEN + 32];
+        char line[CONFIG_KLOG_ENTRY_LEN + CONFIG_KLOG_MODULE_NAME_LEN + 48];
         size_t idx = 0;
 
         line[idx++] = '[';
@@ -880,6 +1130,14 @@ static void command_kdlg(void)
 
         for (size_t j = 0; level[j] && idx < sizeof(line) - 1; ++j)
             line[idx++] = level[j];
+        if (idx < sizeof(line) - 1)
+            line[idx++] = ' ';
+
+        line[idx++] = '(';
+        for (size_t j = 0; module[j] && idx < sizeof(line) - 1; ++j)
+            line[idx++] = module[j];
+        if (idx < sizeof(line) - 1)
+            line[idx++] = ')';
         if (idx < sizeof(line) - 1)
         {
             line[idx++] = ':';
@@ -905,42 +1163,101 @@ static void command_kdlvl(const char *args)
         return;
     }
 
-    char buffer[12];
+    char first_token[CONFIG_KLOG_MODULE_NAME_LEN];
     size_t idx = 0;
-    while (token[idx] && token[idx] != ' ' && idx + 1 < sizeof(buffer))
+    while (token[idx] && token[idx] != ' ' && idx + 1 < sizeof(first_token))
     {
-        buffer[idx] = token[idx];
+        first_token[idx] = token[idx];
         ++idx;
     }
-    buffer[idx] = '\0';
+    first_token[idx] = '\0';
 
-    int level = klog_level_from_name(buffer);
-    if (level < 0)
+    const char *rest = skip_spaces(token + idx);
+    if (*rest == '\0')
     {
-        vga_write_line("Usage: kdlvl [debug|info|warn|error|0-3]");
+        int level = klog_level_from_name(first_token);
+        if (level < 0)
+        {
+            vga_write_line("Usage: kdlvl [level|<module> <level|inherit>]");
+            return;
+        }
+
+        klog_set_level(level);
+        const char *name = klog_level_name(level);
+
+        char logbuf[64];
+        const char *prefix = "kdlvl: global level ";
+        size_t pos = 0;
+        while (prefix[pos] && pos < sizeof(logbuf) - 1)
+        {
+            logbuf[pos] = prefix[pos];
+            ++pos;
+        }
+        for (size_t i = 0; name[i] && pos < sizeof(logbuf) - 1; ++i)
+            logbuf[pos++] = name[i];
+        logbuf[pos] = '\0';
+
+        klog_emit(level, logbuf);
+
+        vga_write("Global klog level set to ");
+        vga_write_line(name);
         return;
     }
 
-    klog_set_level(level);
-
-    const char *name = klog_level_name(level);
-
-    char logbuf[48];
-    const char *prefix = "kdlvl: level set to ";
-    size_t pos = 0;
-    while (prefix[pos] && pos < sizeof(logbuf) - 1)
+    char module_name[CONFIG_KLOG_MODULE_NAME_LEN];
+    size_t module_len = 0;
+    while (first_token[module_len] && module_len + 1 < sizeof(module_name))
     {
-        logbuf[pos] = prefix[pos];
-        ++pos;
+        module_name[module_len] = first_token[module_len];
+        ++module_len;
     }
-    for (size_t i = 0; name[i] && pos < sizeof(logbuf) - 1; ++i)
-        logbuf[pos++] = name[i];
-    logbuf[pos] = '\0';
+    module_name[module_len] = '\0';
 
-    klog_emit(level, logbuf);
+    char level_token[16];
+    size_t level_idx = 0;
+    while (rest[level_idx] && rest[level_idx] != ' ' && level_idx + 1 < sizeof(level_token))
+    {
+        level_token[level_idx] = rest[level_idx];
+        ++level_idx;
+    }
+    level_token[level_idx] = '\0';
 
-    vga_write("kdlvl set to ");
-    vga_write_line(name);
+    int level = klog_level_from_name(level_token);
+    if (level < 0)
+    {
+        if ((level_token[0] == 'i' || level_token[0] == 'I') &&
+            (level_token[1] == 'n' || level_token[1] == 'N') &&
+            (level_token[2] == 'h' || level_token[2] == 'H'))
+        {
+            level = KLOG_LEVEL_INHERIT;
+        }
+        else
+        {
+            vga_write_line("Usage: kdlvl [level|<module> <level|inherit>]");
+            return;
+        }
+    }
+
+    if (klog_module_set_level(module_name, level) < 0)
+    {
+        vga_write_line("kdlvl: failed to update module level");
+        return;
+    }
+
+    if (level == KLOG_LEVEL_INHERIT)
+    {
+        vga_write("Module ");
+        vga_write(module_name);
+        vga_write_line(" level reset to inherit");
+    }
+    else
+    {
+        const char *name = klog_level_name(level);
+        vga_write("Module ");
+        vga_write(module_name);
+        vga_write(" level set to ");
+        vga_write_line(name);
+    }
 }
 
 static void command_proc_count(void)
@@ -1029,94 +1346,170 @@ static void command_spawn(const char *args)
 
 static void command_shutdown(void)
 {
-    vga_write_line("Shutdown: powering off...");
-    klog_info("shutdown: shell request");
+    debug_publish_memory_info();
 
-    /* Try common ACPI power-off ports used by popular emulators. */
-    outw(0x604, 0x2000);
-    outw(0xB004, 0x2000);
-    outw(0x4004, 0x3400);
-    outw(0x600, 0x2001);
+    uint64_t total = (uint64_t)memory_total_bytes();
+    uint64_t used = (uint64_t)memory_used_bytes();
+    uint64_t free_space = (uint64_t)memory_free_bytes();
+    uint32_t base = (uint32_t)memory_heap_base();
+    uint32_t limit = (uint32_t)memory_heap_limit();
+    uint32_t cursor = base + (uint32_t)used;
 
-    __asm__ __volatile__("cli");
-    for (;;)
-        __asm__ __volatile__("hlt");
+    char total_buf[32];
+    char total_kb[32];
+    char used_buf[32];
+    char used_kb[32];
+    char free_buf[32];
+    char free_kb[32];
+    char base_hex[11];
+    char limit_hex[11];
+    char cursor_hex[11];
+
+    write_u64(total, total_buf);
+    write_u64(total / 1024u, total_kb);
+    write_u64(used, used_buf);
+    write_u64(used / 1024u, used_kb);
+    write_u64(free_space, free_buf);
+    write_u64(free_space / 1024u, free_kb);
+    write_hex32(base, base_hex);
+    write_hex32(limit, limit_hex);
+    write_hex32(cursor, cursor_hex);
+
+    vga_write_line("Memory statistics:");
+
+    vga_write("  Total: ");
+    vga_write(total_buf);
+    vga_write(" bytes (");
+    vga_write(total_kb);
+    vga_write_line(" KB)");
+
+    vga_write("  Used : ");
+    vga_write(used_buf);
+    vga_write(" bytes (");
+    vga_write(used_kb);
+    vga_write_line(" KB)");
+
+    vga_write("  Free : ");
+    vga_write(free_buf);
+    vga_write(" bytes (");
+    vga_write(free_kb);
+    vga_write_line(" KB)");
+
+    vga_write("  Heap base   = ");
+    vga_write_line(base_hex);
+    vga_write("  Heap cursor = ");
+    vga_write_line(cursor_hex);
+    vga_write("  Heap limit  = ");
+    vga_write_line(limit_hex);
+
+    uint64_t ticks = get_ticks();
+    uint32_t centis = 0;
+    uint64_t seconds = u64_divmod(ticks, 100U, &centis);
+
+    char sec_buf[32];
+    char centi_buf[4];
+    write_u64(seconds, sec_buf);
+    centi_buf[0] = (char)('0' + (centis / 10U));
+    centi_buf[1] = (char)('0' + (centis % 10U));
+    centi_buf[2] = '\0';
+
+    vga_write("  Uptime: ");
+    vga_write(sec_buf);
+    vga_write(".");
+    vga_write(centi_buf);
+    vga_write_line("s");
+
+    vga_write_line("Shutdown requested (not implemented).");
+    klog_warn("shell: shutdown requested");
 }
 
 static void shell_execute(char *line)
 {
-    line = (char *)skip_spaces(line);
-
-    if (*line == '\0')
+    if (!line)
         return;
 
-    if (shell_str_equals(line, "help"))
+    const char *trimmed = skip_spaces(line);
+    if (*trimmed == '\0')
+        return;
+
+    char *cursor = (char *)trimmed;
+    trim_trailing_spaces(cursor);
+
+    if (shell_str_equals(cursor, "help"))
     {
         command_help();
     }
-    else if (shell_str_equals(line, "clear"))
+    else if (shell_str_equals(cursor, "clear"))
     {
         command_clear();
     }
-    else if (shell_str_equals(line, "mem"))
+    else if (shell_str_equals(cursor, "mem"))
     {
         command_mem();
     }
-    else if (shell_str_equals(line, "reboot"))
+    else if (shell_str_equals(cursor, "reboot"))
     {
         command_reboot();
     }
-    else if (shell_str_equals(line, "ls"))
+    else if (shell_str_equals(cursor, "ls"))
     {
         command_ls();
     }
-    else if (shell_str_equals(line, "catfs") || shell_str_starts_with(line, "catfs "))
+    else if (shell_str_equals(cursor, "catfs") || shell_str_starts_with(cursor, "catfs "))
     {
-        command_catfs(line + 5);
+        command_catfs(cursor + 5);
     }
-    else if (shell_str_equals(line, "cat") || shell_str_starts_with(line, "cat "))
+    else if (shell_str_equals(cursor, "cat") || shell_str_starts_with(cursor, "cat "))
     {
-        command_cat(line + 3);
+        command_cat(cursor + 3);
     }
-    else if (shell_str_equals(line, "proc_list"))
+    else if (shell_str_equals(cursor, "tasks") || shell_str_equals(cursor, "proc_list"))
     {
         command_proc_list();
     }
-    else if (shell_str_equals(line, "lsfs"))
+    else if (shell_str_equals(cursor, "lsfs"))
     {
         command_lsfs();
     }
-    else if (shell_str_equals(line, "mod") || shell_str_starts_with(line, "mod "))
+    else if (shell_str_equals(cursor, "mod") || shell_str_starts_with(cursor, "mod "))
     {
-        command_mod(line + 3);
+        command_mod(cursor + 3);
     }
-    else if (shell_str_equals(line, "gfx"))
+    else if (shell_str_equals(cursor, "gfx"))
     {
         command_gfx();
     }
-    else if (shell_str_equals(line, "kdlg"))
+    else if (shell_str_equals(cursor, "kdlg"))
     {
         command_kdlg();
     }
-    else if (shell_str_equals(line, "kdlvl") || shell_str_starts_with(line, "kdlvl "))
+    else if (shell_str_equals(cursor, "kdlvl") || shell_str_starts_with(cursor, "kdlvl "))
     {
-        command_kdlvl(line + 5);
+        command_kdlvl(cursor + 5);
     }
-    else if (shell_str_equals(line, "proc_count"))
+    else if (shell_str_equals(cursor, "proc_count"))
     {
         command_proc_count();
     }
-    else if (shell_str_equals(line, "spawn") || shell_str_starts_with(line, "spawn "))
+    else if (shell_str_equals(cursor, "spawn") || shell_str_starts_with(cursor, "spawn "))
     {
-        command_spawn(line + 5);
+        command_spawn(cursor + 5);
     }
-    else if (shell_str_equals(line, "shutdown"))
+    else if (shell_str_equals(cursor, "devs"))
+    {
+        command_devlist();
+    }
+    else if (shell_str_equals(cursor, "shutdown"))
     {
         command_shutdown();
     }
-    else if (shell_str_equals(line, "echo") || shell_str_starts_with(line, "echo "))
+    else if (shell_str_equals(cursor, "memdump") || shell_str_starts_with(cursor, "memdump "))
     {
-        command_echo(line + 4);
+        command_memdump(cursor + 7);
+    }
+    else if (shell_str_equals(cursor, "echo") || shell_str_starts_with(cursor, "echo "))
+    {
+        command_echo(cursor + 4);
     }
     else
     {

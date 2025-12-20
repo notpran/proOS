@@ -15,6 +15,7 @@
 #include "devmgr.h"
 #include "ipc.h"
 #include "pit.h"
+#include "debug.h"
 
 extern void shell_run(void);
 extern void user_init(void);
@@ -95,6 +96,8 @@ void kmain(void)
         klog_error("kernel: failed to create shell thread");
     else
         klog_info("kernel: shell thread spawned");
+
+    debug_publish_all();
     print_banner();
     __asm__ __volatile__("sti");
     klog_info("kernel: interrupts enabled");

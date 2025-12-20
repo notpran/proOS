@@ -46,8 +46,10 @@ KERNEL_OBJS := $(BUILD_DIR)/crt0.o \
 		   $(BUILD_DIR)/syscall.o \
 		   $(BUILD_DIR)/kmain.o \
 		   $(BUILD_DIR)/klog.o \
+		   $(BUILD_DIR)/debug.o \
 		   $(BUILD_DIR)/vga.o \
 		   $(BUILD_DIR)/memory.o \
+		   $(BUILD_DIR)/vfs.o \
 		   $(BUILD_DIR)/vbe.o \
 		   $(BUILD_DIR)/gfx.o \
 		   $(BUILD_DIR)/fat16.o \

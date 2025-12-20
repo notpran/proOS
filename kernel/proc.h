@@ -54,6 +54,20 @@ struct process
     process_entry_t entry;
 };
 
+struct process_info
+{
+    int pid;
+    proc_state_t state;
+    thread_kind_t kind;
+    uint8_t base_priority;
+    uint8_t dynamic_priority;
+    uint32_t time_slice_remaining;
+    uint32_t time_slice_ticks;
+    uint64_t wake_deadline;
+    uintptr_t stack_pointer;
+    size_t stack_size;
+};
+
 void process_system_init(void);
 int process_create(void (*entry)(void), size_t stack_size);
 int process_create_kernel(void (*entry)(void), size_t stack_size);
@@ -67,6 +81,7 @@ struct process *process_current(void);
 struct process *process_lookup(int pid);
 void process_debug_list(void);
 int process_count(void);
+size_t process_snapshot(struct process_info *out, size_t max_entries);
 void process_scheduler_tick(void);
 
 /* IPC helpers exposed to syscall layer */

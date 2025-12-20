@@ -8,6 +8,7 @@ struct logger_event
     uint8_t reserved0;
     uint8_t reserved1;
     uint8_t reserved2;
+    char module[CONFIG_KLOG_MODULE_NAME_LEN];
     char text[CONFIG_KLOG_ENTRY_LEN];
 };
 
@@ -99,6 +100,10 @@ void user_logger(void)
 
         const char *level = (event.level < 4) ? level_names[event.level] : "LOG";
         append_text(line, &pos, sizeof(line), level);
+        append_text(line, &pos, sizeof(line), " ");
+        append_char(line, &pos, sizeof(line), '(');
+        append_text(line, &pos, sizeof(line), event.module);
+        append_char(line, &pos, sizeof(line), ')');
         append_text(line, &pos, sizeof(line), ": ");
 
         for (size_t i = 0; i < text_len && pos + 1 < sizeof(line); ++i)

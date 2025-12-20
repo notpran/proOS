@@ -2,6 +2,7 @@
 #include "ramfs.h"
 #include "klog.h"
 #include "string.h"
+#include "debug.h"
 
 struct vfs_mount
 {
@@ -414,6 +415,9 @@ static void vfs_prepare_virtual_fs(void)
 
     const char *null_stub = "";
     vfs_write_file("/dev/null", null_stub, local_strlen(null_stub));
+
+    klog_enable_proc_sink();
+    debug_publish_memory_info();
 }
 
 int vfs_init(void)
