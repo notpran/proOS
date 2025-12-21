@@ -76,7 +76,7 @@ int module_init(void)
     }
 
     const char *status = "pit: 100Hz\n";
-    vfs_write_file("/dev/pit0.status", status, local_strlen(status));
+    vfs_write_file("/Devices/pit0.status", status, local_strlen(status));
 
     return 0;
 }
@@ -84,5 +84,5 @@ int module_init(void)
 void module_exit(void)
 {
     devmgr_unregister_device("pit0");
-    vfs_remove("/dev/pit0.status");
+    vfs_remove("/Devices/pit0.status");
 }

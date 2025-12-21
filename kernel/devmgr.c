@@ -159,12 +159,12 @@ static void publish_device(const struct device_node *node)
         return;
 
     char path[VFS_NODE_NAME_MAX];
-    const char prefix[] = "/dev/";
+    const char prefix[] = "/Devices/";
     size_t prefix_len = sizeof(prefix) - 1;
     size_t name_len = str_length(node->name);
     if (prefix_len + name_len + 1 > sizeof(path))
     {
-        klog_warn("devmgr: device name too long for /dev");
+        klog_warn("devmgr: device name too long for /Devices");
         return;
     }
 
@@ -249,7 +249,7 @@ static void unpublish_device(const struct device_node *node)
         return;
 
     char path[VFS_NODE_NAME_MAX];
-    const char prefix[] = "/dev/";
+    const char prefix[] = "/Devices/";
     size_t prefix_len = sizeof(prefix) - 1;
     size_t name_len = str_length(node->name);
     if (prefix_len + name_len + 1 > sizeof(path))
@@ -328,7 +328,7 @@ void devmgr_refresh_ramfs(void)
         pos = sizeof(listing) - 1;
     listing[pos] = '\0';
 
-    if (vfs_write_file("/dev/devices", listing, pos) < 0)
+    if (vfs_write_file("/System/devices", listing, pos) < 0)
         klog_warn("devmgr: failed to publish device tree");
 
     debug_publish_device_list();

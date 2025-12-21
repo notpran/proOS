@@ -118,7 +118,7 @@ void debug_publish_memory_info(void)
         pos = sizeof(buffer) - 1;
     buffer[pos] = '\0';
 
-    vfs_write_file("/proc/meminfo", buffer, pos);
+    vfs_write_file("/System/meminfo", buffer, pos);
 }
 
 static const char *state_name(proc_state_t state)
@@ -144,12 +144,12 @@ void debug_publish_task_list(void)
     struct process_info info[MAX_PROCS];
     size_t count = process_snapshot(info, MAX_PROCS);
 
-    vfs_write_file("/proc/tasks", NULL, 0);
+    vfs_write_file("/System/tasks", NULL, 0);
 
     char line[160];
     size_t pos = 0;
     append_text(line, &pos, sizeof(line), "PID STATE    KIND PRI(base/dyn) REM TICKS WAKE STACK ESP\n");
-    vfs_write("/proc/tasks", line, pos);
+    vfs_write("/System/tasks", line, pos);
 
     for (size_t i = 0; i < count; ++i)
     {
@@ -179,7 +179,7 @@ void debug_publish_task_list(void)
         if (pos >= sizeof(line))
             pos = sizeof(line) - 1;
         line[pos] = '\0';
-        vfs_write("/proc/tasks", line, pos);
+        vfs_write("/System/tasks", line, pos);
     }
 }
 
@@ -198,12 +198,12 @@ void debug_publish_device_list(void)
     const struct device_node *nodes[DEVMGR_MAX_DEVICES];
     size_t count = devmgr_enumerate(nodes, DEVMGR_MAX_DEVICES);
 
-    vfs_write_file("/proc/devices", NULL, 0);
+    vfs_write_file("/System/devices", NULL, 0);
 
     char line[192];
     size_t pos = 0;
     append_text(line, &pos, sizeof(line), "ID NAME TYPE FLAGS PARENT\n");
-    vfs_write("/proc/devices", line, pos);
+    vfs_write("/System/devices", line, pos);
 
     for (size_t i = 0; i < count; ++i)
     {
@@ -223,7 +223,7 @@ void debug_publish_device_list(void)
         if (pos >= sizeof(line))
             pos = sizeof(line) - 1;
         line[pos] = '\0';
-        vfs_write("/proc/devices", line, pos);
+        vfs_write("/System/devices", line, pos);
     }
 }
 

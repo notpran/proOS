@@ -331,7 +331,7 @@ void klog_refresh_proc_sink(void)
     struct klog_entry entries[CONFIG_KLOG_CAPACITY];
     size_t count = klog_copy(entries, CONFIG_KLOG_CAPACITY);
 
-    vfs_write_file("/proc/log", NULL, 0);
+    vfs_write_file("/System/log", NULL, 0);
 
     for (size_t i = 0; i < count; ++i)
     {
@@ -350,8 +350,8 @@ void klog_refresh_proc_sink(void)
         append_char(line, &pos, sizeof(line), ' ');
         append_text(line, &pos, sizeof(line), entries[i].text);
         line[pos] = '\0';
-        vfs_write("/proc/log", line, pos);
-        vfs_write("/proc/log", "\n", 1);
+        vfs_write("/System/log", line, pos);
+        vfs_write("/System/log", "\n", 1);
     }
 
     proc_sink_guard = 0;

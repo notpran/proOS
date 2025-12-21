@@ -15,8 +15,12 @@ struct vfs_mount
 
 static struct vfs_mount mount_table[VFS_MAX_MOUNTS];
 static struct vfs_mount *root_mount = NULL;
-static struct ramfs_volume dev_volume;
-static struct ramfs_volume proc_volume;
+static struct ramfs_volume system_volume;
+static struct ramfs_volume volumes_volume;
+static struct ramfs_volume users_volume;
+static struct ramfs_volume apps_volume;
+static struct ramfs_volume temp_volume;
+static struct ramfs_volume devices_volume;
 
 static int mounts_initialized = 0;
 
@@ -232,48 +236,6 @@ static const struct vfs_fs_ops ramfs_ops = {
     .remove = ramfs_remove_adapter
 };
 
-static int stub_list(void *ctx, const char *path, char *buffer, size_t buffer_size)
-{
-    (void)ctx;
-    (void)path;
-    if (buffer_size > 0)
-        buffer[0] = '\0';
-    return 0;
-}
-
-static int stub_read(void *ctx, const char *path, char *buffer, size_t buffer_size)
-{
-    (void)ctx;
-    (void)path;
-    (void)buffer;
-    (void)buffer_size;
-    return -1;
-}
-
-static int stub_write(void *ctx, const char *path, const char *data, size_t length, enum vfs_write_mode mode)
-{
-    (void)ctx;
-    (void)path;
-    (void)data;
-    (void)length;
-    (void)mode;
-    return -1;
-}
-
-static int stub_remove(void *ctx, const char *path)
-{
-    (void)ctx;
-    (void)path;
-    return -1;
-}
-
-static const struct vfs_fs_ops fat_stub_ops = {
-    .list = stub_list,
-    .read = stub_read,
-    .write = stub_write,
-    .remove = stub_remove
-};
-
 int vfs_mount(const char *mount_point, const struct vfs_fs_ops *ops, void *ctx)
 {
     if (!mount_point || !ops)
@@ -402,19 +364,47 @@ int vfs_remove(const char *path)
     return mount->ops->remove(mount->ctx, safe_relative(relative));
 }
 
+static void add_root_directory(const char *name)
+{
+    if (!name)
+        return;
+    struct ramfs_volume *root = ramfs_root_volume();
+    ramfs_volume_write(root, name, NULL, 0);
+}
+
 static void vfs_prepare_virtual_fs(void)
 {
-    ramfs_volume_init(&dev_volume);
-    ramfs_volume_init(&proc_volume);
+    const char *top_level[] = {
+        "System",
+        "Volumes",
+        "Users",
+        "Apps",
+        "Temp",
+        "Devices"
+    };
 
-    vfs_mount("/dev", &ramfs_ops, &dev_volume);
-    vfs_mount("/proc", &ramfs_ops, &proc_volume);
+    for (size_t i = 0; i < sizeof(top_level) / sizeof(top_level[0]); ++i)
+        add_root_directory(top_level[i]);
+
+    ramfs_volume_init(&system_volume);
+    ramfs_volume_init(&volumes_volume);
+    ramfs_volume_init(&users_volume);
+    ramfs_volume_init(&apps_volume);
+    ramfs_volume_init(&temp_volume);
+    ramfs_volume_init(&devices_volume);
+
+    vfs_mount("/System", &ramfs_ops, &system_volume);
+    vfs_mount("/Volumes", &ramfs_ops, &volumes_volume);
+    vfs_mount("/Users", &ramfs_ops, &users_volume);
+    vfs_mount("/Apps", &ramfs_ops, &apps_volume);
+    vfs_mount("/Temp", &ramfs_ops, &temp_volume);
+    vfs_mount("/Devices", &ramfs_ops, &devices_volume);
 
     const char *version = "proOS kernel/0.5\n";
-    vfs_write_file("/proc/version", version, local_strlen(version));
+    vfs_write_file("/System/version", version, local_strlen(version));
 
     const char *null_stub = "";
-    vfs_write_file("/dev/null", null_stub, local_strlen(null_stub));
+    vfs_write_file("/Devices/Null", null_stub, local_strlen(null_stub));
 
     klog_enable_proc_sink();
     debug_publish_memory_info();
@@ -442,7 +432,6 @@ int vfs_init(void)
     }
 
     vfs_prepare_virtual_fs();
-    vfs_mount("/fat", &fat_stub_ops, NULL);
 
     mounts_initialized = 1;
     return 0;

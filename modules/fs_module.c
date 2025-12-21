@@ -42,7 +42,7 @@ static void try_load_font(void)
     }
 
     const char *note = "font: loaded from FAT16\n";
-    if (vfs_write("/proc/font.status", note, local_strlen(note)) < 0)
+    if (vfs_write("/System/font.status", note, local_strlen(note)) < 0)
         klog_warn("fs.module: vfs_write font.status failed");
     else
         klog_info("fs.module: font loaded");

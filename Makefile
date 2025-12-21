@@ -21,7 +21,9 @@ FAT16_IMG_TOOL := $(BUILD_DIR)/fat16_image.exe
 FAT16_IMG := $(BUILD_DIR)/fat16.img
 FAT16_SECTORS := 128
 STAGE2_SECTORS := 4
-KERNEL_SECTORS := 256
+# Reserve enough space for the kernel binary (current size ~132 KiB).
+# Keep headroom so future growth does not truncate the image loading.
+KERNEL_SECTORS := 384
 KERNEL_OFFSET := 5
 FAT16_OFFSET := $(shell expr $(KERNEL_OFFSET) + $(KERNEL_SECTORS))
 

@@ -25,6 +25,7 @@
 static char shell_history[SHELL_HISTORY_CAPACITY][INPUT_MAX];
 static size_t shell_history_count = 0;
 static size_t shell_history_next = 0;
+static char shell_cwd[VFS_MAX_PATH] = "/";
 
 static size_t str_len(const char *s)
 {
@@ -152,6 +153,66 @@ static void trim_trailing_spaces(char *str)
     }
 }
 
+static int shell_normalize_absolute(const char *input, char *out, size_t capacity)
+{
+    if (!input || !out || capacity < 2)
+        return -1;
+    if (input[0] != '/')
+        return -1;
+
+    const char *segments[32];
+    size_t seg_lengths[32];
+    size_t seg_count = 0;
+    size_t i = 0;
+
+    while (input[i])
+    {
+        while (input[i] == '/')
+            ++i;
+        if (input[i] == '\0')
+            break;
+        size_t start = i;
+        while (input[i] && input[i] != '/')
+            ++i;
+        size_t len = i - start;
+        if (len == 0)
+            continue;
+        if (len == 1 && input[start] == '.')
+            continue;
+        if (len == 2 && input[start] == '.' && input[start + 1] == '.')
+        {
+            if (seg_count > 0)
+                --seg_count;
+            continue;
+        }
+        if (seg_count >= 32)
+            return -1;
+        segments[seg_count] = &input[start];
+        seg_lengths[seg_count] = len;
+        ++seg_count;
+    }
+
+    size_t out_pos = 0;
+    if (seg_count == 0)
+    {
+        out[0] = '/';
+        out[1] = '\0';
+        return 0;
+    }
+
+    for (size_t seg = 0; seg < seg_count; ++seg)
+    {
+        size_t len = seg_lengths[seg];
+        if (out_pos + len + 1 >= capacity)
+            return -1;
+        out[out_pos++] = '/';
+        for (size_t j = 0; j < len; ++j)
+            out[out_pos++] = segments[seg][j];
+    }
+    out[out_pos] = '\0';
+    return 0;
+}
+
 static void shell_replace_input(char *buffer, size_t *len, size_t max_len, const char *text)
 {
     if (!buffer || !len || !text || max_len == 0)
@@ -178,18 +239,64 @@ static void shell_replace_input(char *buffer, size_t *len, size_t max_len, const
 
 static const char *resolve_absolute_path(const char *input, char *scratch, size_t scratch_size)
 {
-    if (!input || !scratch || scratch_size < 2)
+    if (!scratch || scratch_size < 2)
         return NULL;
+
+    if (!input || *input == '\0')
+    {
+        if (shell_normalize_absolute(shell_cwd, scratch, scratch_size) < 0)
+            return NULL;
+        return scratch;
+    }
+
     if (input[0] == '/')
-        return input;
-    size_t len = str_len(input);
-    if (len + 1 >= scratch_size)
+    {
+        if (shell_normalize_absolute(input, scratch, scratch_size) < 0)
+            return NULL;
+        return scratch;
+    }
+
+    char candidate[VFS_MAX_PATH];
+    size_t pos = 0;
+    size_t cwd_len = str_len(shell_cwd);
+    if (cwd_len == 0)
         return NULL;
-    scratch[0] = '/';
-    for (size_t i = 0; i < len; ++i)
-        scratch[i + 1] = input[i];
-    scratch[len + 1] = '\0';
+
+    if (cwd_len == 1 && shell_cwd[0] == '/')
+    {
+        candidate[pos++] = '/';
+    }
+    else
+    {
+        if (cwd_len >= sizeof(candidate))
+            return NULL;
+        for (size_t i = 0; i < cwd_len && pos + 1 < sizeof(candidate); ++i)
+            candidate[pos++] = shell_cwd[i];
+        if (candidate[pos - 1] != '/' && pos + 1 < sizeof(candidate))
+            candidate[pos++] = '/';
+    }
+
+    size_t idx = 0;
+    while (input[idx] && pos + 1 < sizeof(candidate))
+        candidate[pos++] = input[idx++];
+
+    if (input[idx])
+        return NULL;
+
+    candidate[pos] = '\0';
+
+    if (shell_normalize_absolute(candidate, scratch, scratch_size) < 0)
+        return NULL;
+
     return scratch;
+}
+
+static void shell_set_cwd(const char *path)
+{
+    if (!path)
+        return;
+    if (shell_normalize_absolute(path, shell_cwd, sizeof(shell_cwd)) < 0)
+        return;
 }
 
 static int parse_positive_int(const char *text, int *out_value)
@@ -470,10 +577,9 @@ static void command_help(void)
     vga_write_line("  mem    - memory + uptime info");
     vga_write_line("  memdump <addr> [len] - hex dump memory");
     vga_write_line("  reboot - reset the machine");
-    vga_write_line("  ls     - list RAMFS files");
-    vga_write_line("  cat    - print file contents");
-    vga_write_line("  lsfs   - list FAT16 files");
-    vga_write_line("  catfs  - print FAT16 file");
+    vga_write_line("  ls [path] - list directory contents");
+    vga_write_line("  cd [path] - change working directory");
+    vga_write_line("  cat <file> - print file contents");
     vga_write_line("  mod    - module control (list/load/unload .kmd)");
     vga_write_line("  gfx    - draw compositor demo");
     vga_write_line("  kdlg   - show kernel log");
@@ -642,13 +748,56 @@ static void command_reboot(void)
         __asm__ __volatile__("hlt");
 }
 
-static void command_ls(void)
+static void command_ls(const char *args)
 {
     char list[512];
-    int len = vfs_list("/", list, sizeof(list));
+    char path[VFS_MAX_PATH];
+    char absolute[VFS_MAX_PATH];
+
+    const char *trimmed = skip_spaces(args ? args : "");
+    const char *target = shell_cwd;
+
+    if (*trimmed)
+    {
+        size_t idx = 0;
+        while (trimmed[idx] && trimmed[idx] != ' ' && idx + 1 < sizeof(path))
+        {
+            path[idx] = trimmed[idx];
+            ++idx;
+        }
+
+        if (trimmed[idx] != '\0' && trimmed[idx] != ' ')
+        {
+            vga_write_line("ls: path too long");
+            return;
+        }
+
+        path[idx] = '\0';
+
+        const char *rest = skip_spaces(trimmed + idx);
+        if (*rest)
+        {
+            vga_write_line("ls: too many arguments");
+            return;
+        }
+
+        const char *resolved = resolve_absolute_path(path, absolute, sizeof(absolute));
+        if (!resolved)
+        {
+            vga_write_line("ls: invalid path");
+            return;
+        }
+
+        target = resolved;
+    }
+
+    int len = vfs_list(target, list, sizeof(list));
     if (len <= 0)
     {
-        vga_write_line("(empty)");
+        if (len < 0)
+            vga_write_line("ls: path not found");
+        else
+            vga_write_line("(empty)");
         return;
     }
 
@@ -703,6 +852,61 @@ static void command_cat(const char *arg)
     vga_write_line(data);
 }
 
+static void command_cd(const char *args)
+{
+    const char *token = skip_spaces(args ? args : "");
+    if (*token == '\0')
+    {
+        vga_write_line(shell_cwd);
+        return;
+    }
+
+    char target[VFS_MAX_PATH];
+    size_t idx = 0;
+    while (token[idx] && token[idx] != ' ' && idx + 1 < sizeof(target))
+    {
+        target[idx] = token[idx];
+        ++idx;
+    }
+
+    if (token[idx] != '\0' && token[idx] != ' ')
+    {
+        vga_write_line("cd: path too long");
+        return;
+    }
+
+    target[idx] = '\0';
+
+    const char *rest = skip_spaces(token + idx);
+    if (*rest)
+    {
+        vga_write_line("cd: too many arguments");
+        return;
+    }
+
+    char absolute[VFS_MAX_PATH];
+    const char *resolved = resolve_absolute_path(target, absolute, sizeof(absolute));
+    if (!resolved)
+    {
+        vga_write_line("cd: invalid path");
+        return;
+    }
+
+    char probe[64];
+    int list = vfs_list(resolved, probe, sizeof(probe));
+    if (list < 0)
+    {
+        char tmp[VFS_INLINE_CAP];
+        if (vfs_read(resolved, tmp, sizeof(tmp)) >= 0)
+            vga_write_line("cd: not a directory");
+        else
+            vga_write_line("cd: no such path");
+        return;
+    }
+
+    shell_set_cwd(resolved);
+}
+
 static void command_mod_list(void)
 {
     const module_handle_t *handles[32];
@@ -741,110 +945,302 @@ static void command_mod_list(void)
     }
 }
 
-static int build_module_filename(const char *name, char *out, size_t out_size)
+static void release_module_buffer(void *buffer)
 {
-    if (!name || !out || out_size == 0)
+    (void)buffer;
+}
+
+static int append_kmd_extension(char *path, size_t capacity)
+{
+    if (!path || capacity == 0)
         return 0;
 
     size_t len = 0;
-    while (name[len] && name[len] != ' ' && len + 1 < out_size)
+    size_t last_sep = 0;
+    while (path[len])
     {
-        out[len] = name[len];
+        if (path[len] == '/')
+            last_sep = len + 1u;
         ++len;
+        if (len >= capacity)
+            return 0;
     }
-    out[len] = '\0';
-
-    if (len == 0)
-        return 0;
 
     int has_dot = 0;
-    for (size_t i = 0; i < len; ++i)
+    for (size_t i = last_sep; i < len; ++i)
     {
-        if (out[i] == '.')
+        if (path[i] == '.')
         {
             has_dot = 1;
             break;
         }
     }
 
-    if (!has_dot)
+    if (has_dot)
+        return 1;
+
+    if (len + 4 >= capacity)
+        return 0;
+
+    path[len++] = '.';
+    path[len++] = 'k';
+    path[len++] = 'm';
+    path[len++] = 'd';
+    path[len] = '\0';
+    return 1;
+}
+
+static int module_filename_from_path(const char *path, char *out, size_t capacity)
+{
+    if (!path || !out || capacity == 0)
+        return 0;
+
+    size_t last = 0;
+    for (size_t i = 0; path[i]; ++i)
     {
-        if (len + 4 >= out_size)
-            return 0;
-        out[len++] = '.';
-        out[len++] = 'k';
-        out[len++] = 'm';
-        out[len++] = 'd';
-        out[len] = '\0';
+        if (path[i] == '/')
+            last = i + 1u;
     }
 
-    return 1;
+    size_t idx = 0;
+    while (path[last + idx] && idx + 1 < capacity)
+    {
+        out[idx] = path[last + idx];
+        ++idx;
+    }
+
+    if (path[last + idx])
+    {
+        out[0] = '\0';
+        return 0;
+    }
+
+    out[idx] = '\0';
+    return idx > 0;
+}
+
+static int load_module_image_from_absolute(const char *absolute, uint8_t **out_buffer, size_t *out_size)
+{
+    if (!absolute || !out_buffer || !out_size)
+        return -1;
+
+    *out_buffer = NULL;
+    *out_size = 0;
+
+    const char volume_prefix[] = "/Volumes/Disk0/";
+    if (shell_str_starts_with(absolute, volume_prefix))
+    {
+        if (!fat16_ready())
+            return -2;
+
+        const char *name = absolute + str_len(volume_prefix);
+        if (!name[0])
+            return -1;
+
+        for (size_t i = 0; name[i]; ++i)
+        {
+            if (name[i] == '/')
+                return -1;
+        }
+
+        if (str_len(name) >= 48)
+            return -1;
+
+        uint32_t file_size = 0;
+        if (fat16_file_size(name, &file_size) < 0 || file_size == 0)
+            return -1;
+
+        uint8_t *buffer = (uint8_t *)kalloc(file_size);
+        if (!buffer)
+            return -3;
+
+        size_t read_size = 0;
+        if (fat16_read_file(name, buffer, file_size, &read_size) < 0 || read_size != file_size)
+        {
+            release_module_buffer(buffer);
+            return -1;
+        }
+
+        *out_buffer = buffer;
+        *out_size = file_size;
+        return 0;
+    }
+
+    uint8_t *buffer = (uint8_t *)kalloc(VFS_INLINE_CAP);
+    if (!buffer)
+        return -3;
+
+    int read = vfs_read(absolute, (char *)buffer, VFS_INLINE_CAP);
+    if (read <= 0)
+    {
+        release_module_buffer(buffer);
+        return -1;
+    }
+
+    *out_buffer = buffer;
+    *out_size = (size_t)read;
+    return 0;
 }
 
 static void command_mod_load(const char *args)
 {
-    const char *name_ptr = skip_spaces(args);
-    char module_name[MODULE_NAME_MAX];
-    size_t idx = 0;
-    while (name_ptr[idx] && name_ptr[idx] != ' ' && idx + 1 < sizeof(module_name))
-    {
-        module_name[idx] = name_ptr[idx];
-        ++idx;
-    }
-    module_name[idx] = '\0';
-
-    if (module_name[0] == '\0')
+    const char *token = skip_spaces(args ? args : "");
+    if (*token == '\0')
     {
         vga_write_line("Usage: mod load <module>");
         return;
     }
 
-    strip_kmd_extension(module_name);
-
-    if (module_find(module_name))
+    char requested[VFS_MAX_PATH];
+    size_t idx = 0;
+    while (token[idx] && token[idx] != ' ' && idx + 1 < sizeof(requested))
     {
-        vga_write_line("mod: module already loaded");
+        requested[idx] = token[idx];
+        ++idx;
+    }
+
+    if (token[idx] != '\0' && token[idx] != ' ')
+    {
+        vga_write_line("mod: path too long");
         return;
     }
 
-    if (!fat16_ready())
+    requested[idx] = '\0';
+
+    const char *rest = skip_spaces(token + idx);
+    if (*rest)
     {
-        vga_write_line("mod: FAT16 image unavailable");
+        vga_write_line("mod: too many arguments");
         return;
     }
 
-    char filename[48];
-    if (!build_module_filename(module_name, filename, sizeof(filename)))
+    int has_separator = 0;
+    for (size_t i = 0; requested[i]; ++i)
+    {
+        if (requested[i] == '/')
+        {
+            has_separator = 1;
+            break;
+        }
+    }
+
+    if (!append_kmd_extension(requested, sizeof(requested)))
+    {
+        vga_write_line("mod: invalid module path");
+        return;
+    }
+
+    char module_filename[MODULE_NAME_MAX];
+    if (!module_filename_from_path(requested, module_filename, sizeof(module_filename)))
     {
         vga_write_line("mod: invalid module name");
         return;
     }
 
-    uint32_t file_size = 0;
-    if (fat16_file_size(filename, &file_size) < 0 || file_size == 0)
+    char module_name[MODULE_NAME_MAX];
+    size_t copy = 0;
+    while (module_filename[copy] && copy + 1 < sizeof(module_name))
     {
-        vga_write_line("mod: file not found on FAT16");
+        module_name[copy] = module_filename[copy];
+        ++copy;
+    }
+    module_name[copy] = '\0';
+    strip_kmd_extension(module_name);
+
+    if (module_name[0] != '\0' && module_find(module_name))
+    {
+        vga_write_line("mod: module already loaded");
         return;
     }
 
-    uint8_t *buffer = (uint8_t *)kalloc(file_size);
-    if (!buffer)
+    char absolute[VFS_MAX_PATH];
+    const char *resolved = resolve_absolute_path(requested, absolute, sizeof(absolute));
+    if (!resolved)
     {
-        vga_write_line("mod: out of memory");
+        vga_write_line("mod: invalid path");
         return;
     }
 
-    size_t read_size = 0;
-    if (fat16_read_file(filename, buffer, file_size, &read_size) < 0 || read_size != file_size)
+    uint8_t *image = NULL;
+    size_t image_size = 0;
+    int status = load_module_image_from_absolute(resolved, &image, &image_size);
+
+    char fallback_path[VFS_MAX_PATH];
+    if (status < 0 && !has_separator)
     {
-        vga_write_line("mod: failed to read module image");
+        const char volume_prefix[] = "/Volumes/Disk0/";
+        size_t prefix_len = str_len(volume_prefix);
+        size_t file_len = str_len(module_filename);
+
+        if (status == -3)
+        {
+            /* already out of memory, skip fallback to avoid repeated allocation */
+        }
+        else if (status == -2 || !fat16_ready())
+        {
+            status = -2;
+        }
+        else if (prefix_len + file_len < sizeof(fallback_path))
+        {
+            for (size_t i = 0; i < prefix_len; ++i)
+                fallback_path[i] = volume_prefix[i];
+            for (size_t i = 0; i < file_len; ++i)
+                fallback_path[prefix_len + i] = module_filename[i];
+            fallback_path[prefix_len + file_len] = '\0';
+
+            status = load_module_image_from_absolute(fallback_path, &image, &image_size);
+            if (status == 0)
+                resolved = fallback_path;
+        }
+    }
+
+    if (status < 0)
+    {
+        if (image)
+        {
+            release_module_buffer(image);
+            image = NULL;
+        }
+
+        if (status == -3)
+            vga_write_line("mod: out of memory");
+        else if (status == -2)
+            vga_write_line("mod: FAT16 image unavailable");
+        else
+            vga_write_line("mod: failed to read module image");
         return;
     }
 
-    if (module_load_image(filename, buffer, file_size, 0) == 0)
+    if (!module_filename_from_path(resolved, module_filename, sizeof(module_filename)))
+    {
+        if (image)
+        {
+            release_module_buffer(image);
+            image = NULL;
+        }
+        vga_write_line("mod: invalid module name");
+        return;
+    }
+
+    copy = 0;
+    while (module_filename[copy] && copy + 1 < sizeof(module_name))
+    {
+        module_name[copy] = module_filename[copy];
+        ++copy;
+    }
+    module_name[copy] = '\0';
+    strip_kmd_extension(module_name);
+
+    int rc = module_load_image(module_filename, image, image_size, 0);
+    release_module_buffer(image);
+
+    if (rc == 0)
     {
         vga_write("mod: loaded ");
-        vga_write_line(module_name);
+        if (module_name[0])
+            vga_write_line(module_name);
+        else
+            vga_write_line(module_filename);
     }
     else
     {
@@ -854,23 +1250,93 @@ static void command_mod_load(const char *args)
 
 static void command_mod_unload(const char *args)
 {
-    const char *name_ptr = skip_spaces(args);
-    char module_name[MODULE_NAME_MAX];
-    size_t idx = 0;
-    while (name_ptr[idx] && name_ptr[idx] != ' ' && idx + 1 < sizeof(module_name))
-    {
-        module_name[idx] = name_ptr[idx];
-        ++idx;
-    }
-    module_name[idx] = '\0';
-
-    if (module_name[0] == '\0')
+    const char *token = skip_spaces(args ? args : "");
+    if (*token == '\0')
     {
         vga_write_line("Usage: mod unload <module>");
         return;
     }
 
+    char requested[VFS_MAX_PATH];
+    size_t idx = 0;
+    while (token[idx] && token[idx] != ' ' && idx + 1 < sizeof(requested))
+    {
+        requested[idx] = token[idx];
+        ++idx;
+    }
+
+    if (token[idx] != '\0' && token[idx] != ' ')
+    {
+        vga_write_line("mod: path too long");
+        return;
+    }
+
+    requested[idx] = '\0';
+
+    const char *rest = skip_spaces(token + idx);
+    if (*rest)
+    {
+        vga_write_line("mod: too many arguments");
+        return;
+    }
+
+    int has_separator = 0;
+    for (size_t i = 0; requested[i]; ++i)
+    {
+        if (requested[i] == '/')
+        {
+            has_separator = 1;
+            break;
+        }
+    }
+
+    char module_name[MODULE_NAME_MAX];
+    if (has_separator)
+    {
+        if (!append_kmd_extension(requested, sizeof(requested)))
+        {
+            vga_write_line("mod: invalid module path");
+            return;
+        }
+
+        char module_filename[MODULE_NAME_MAX];
+        if (!module_filename_from_path(requested, module_filename, sizeof(module_filename)))
+        {
+            vga_write_line("mod: invalid module name");
+            return;
+        }
+
+        size_t copy = 0;
+        while (module_filename[copy] && copy + 1 < sizeof(module_name))
+        {
+            module_name[copy] = module_filename[copy];
+            ++copy;
+        }
+        module_name[copy] = '\0';
+    }
+    else
+    {
+        size_t copy = 0;
+        while (requested[copy] && copy + 1 < sizeof(module_name))
+        {
+            module_name[copy] = requested[copy];
+            ++copy;
+        }
+        if (requested[copy])
+        {
+            vga_write_line("mod: module name too long");
+            return;
+        }
+        module_name[copy] = '\0';
+    }
+
     strip_kmd_extension(module_name);
+
+    if (module_name[0] == '\0')
+    {
+        vga_write_line("mod: invalid module name");
+        return;
+    }
 
     const module_handle_t *handle = module_find(module_name);
     if (!handle)
@@ -1115,71 +1581,6 @@ static void command_memdump(const char *args)
         line[pos] = '\0';
         vga_write_line(line);
     }
-}
-
-static void command_lsfs(void)
-{
-    if (!fat16_ready())
-    {
-        vga_write_line("FAT16 image not available.");
-        return;
-    }
-
-    char buffer[512];
-    int len = fat16_ls(buffer, sizeof(buffer));
-    if (len <= 0)
-    {
-        vga_write_line("(empty)");
-        return;
-    }
-
-    char *ptr = buffer;
-    while (*ptr)
-    {
-        char *line_start = ptr;
-        while (*ptr && *ptr != '\n')
-            ++ptr;
-        char saved = *ptr;
-        *ptr = '\0';
-        vga_write_line(line_start);
-        if (saved == '\n')
-            ++ptr;
-    }
-}
-
-static void command_catfs(const char *arg)
-{
-    if (!fat16_ready())
-    {
-        vga_write_line("FAT16 image not available.");
-        return;
-    }
-
-    const char *name_ptr = skip_spaces(arg);
-    if (*name_ptr == '\0')
-    {
-        vga_write_line("Usage: catfs <file>");
-        return;
-    }
-
-    char name[32];
-    size_t idx = 0;
-    while (name_ptr[idx] && name_ptr[idx] != ' ' && idx + 1 < sizeof(name))
-    {
-        name[idx] = name_ptr[idx];
-        ++idx;
-    }
-    name[idx] = '\0';
-
-    char data[768];
-    int read = fat16_read(name, data, sizeof(data));
-    if (read < 0)
-    {
-        vga_write_line("File not found.");
-        return;
-    }
-
-    vga_write_line(data);
 }
 
 static void command_gfx(void)
@@ -1533,6 +1934,15 @@ static void command_shutdown(void)
     power_shutdown();
 }
 
+static void shell_render_prompt(void)
+{
+    vga_set_color(0xB, 0x0);
+    vga_write("proOS ");
+    vga_write(shell_cwd);
+    vga_write(" >> ");
+    vga_set_color(0x7, 0x0);
+}
+
 static void shell_execute(char *line)
 {
     if (!line)
@@ -1563,11 +1973,19 @@ static void shell_execute(char *line)
     }
     else if (shell_str_equals(cursor, "ls"))
     {
-        command_ls();
+        command_ls("");
     }
-    else if (shell_str_equals(cursor, "catfs") || shell_str_starts_with(cursor, "catfs "))
+    else if (shell_str_starts_with(cursor, "ls "))
     {
-        command_catfs(cursor + 5);
+        command_ls(cursor + 2);
+    }
+    else if (shell_str_equals(cursor, "cd"))
+    {
+        command_cd("");
+    }
+    else if (shell_str_starts_with(cursor, "cd "))
+    {
+        command_cd(cursor + 2);
     }
     else if (shell_str_equals(cursor, "cat") || shell_str_starts_with(cursor, "cat "))
     {
@@ -1576,10 +1994,6 @@ static void shell_execute(char *line)
     else if (shell_str_equals(cursor, "tasks") || shell_str_equals(cursor, "proc_list"))
     {
         command_proc_list();
-    }
-    else if (shell_str_equals(cursor, "lsfs"))
-    {
-        command_lsfs();
     }
     else if (shell_str_equals(cursor, "mod") || shell_str_starts_with(cursor, "mod "))
     {
@@ -1633,9 +2047,7 @@ void shell_run(void)
 
     while (1)
     {
-        vga_set_color(0xB, 0x0);
-        vga_write(SHELL_PROMPT);
-        vga_set_color(0x7, 0x0);
+        shell_render_prompt();
         size_t len = shell_read_line(buffer, sizeof(buffer));
         if (len > 0)
             history_store(buffer);

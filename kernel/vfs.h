@@ -7,7 +7,7 @@
 #define VFS_MAX_MOUNTS 8
 #define VFS_MAX_PATH    128
 #define VFS_NODE_NAME_MAX 32
-#define VFS_INLINE_CAP   1024
+#define VFS_INLINE_CAP   8192
 
 enum vfs_write_mode
 {

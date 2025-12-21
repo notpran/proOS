@@ -206,10 +206,6 @@ void ramfs_init(void)
 {
     struct ramfs_volume *volume = ramfs_root_volume();
     ramfs_volume_init(volume);
-
-    const char *welcome = "Welcome to proOS!";
-    ramfs_volume_append(volume, "hello.txt", welcome, str_len(welcome));
-    ramfs_volume_append(volume, "hello.txt", "\n", 1);
 }
 
 int ramfs_list(char *buffer, size_t buffer_size)

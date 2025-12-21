@@ -3,7 +3,6 @@
 #define BUFFER_SIZE 256
 
 extern void user_echo_service(void);
-extern void user_logger(void);
 
 int g_echo_channel = -1;
 
@@ -41,12 +40,6 @@ void user_init(void)
     }
 
     g_echo_channel = channel;
-
-    int logger_pid = sys_spawn(user_logger, 4096);
-    if (logger_pid < 0)
-    {
-        write_line("init: logger spawn failed");
-    }
 
     int echo_pid = sys_spawn(user_echo_service, 4096);
     if (echo_pid < 0)

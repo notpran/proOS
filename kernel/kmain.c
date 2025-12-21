@@ -70,6 +70,10 @@ void kmain(void)
     if (fat_ok)
     {
         klog_info("kernel: FAT16 image mounted");
+        if (fat16_mount_volume("Disk0") == 0)
+            klog_info("kernel: FAT16 volume available at /Volumes/Disk0");
+        else
+            klog_warn("kernel: failed to expose FAT16 volume");
     }
     else
     {

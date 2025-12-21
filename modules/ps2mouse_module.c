@@ -63,12 +63,12 @@ int module_init(void)
     klog_info("ps2mouse.driver: registered (stub)");
 
     const char *status = "ps2mouse: stub driver\n";
-    vfs_write_file("/dev/ps2mouse0.status", status, local_strlen(status));
+    vfs_write_file("/Devices/ps2mouse0.status", status, local_strlen(status));
     return 0;
 }
 
 void module_exit(void)
 {
     devmgr_unregister_device("ps2mouse0");
-    vfs_remove("/dev/ps2mouse0.status");
+    vfs_remove("/Devices/ps2mouse0.status");
 }

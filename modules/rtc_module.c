@@ -137,7 +137,7 @@ int module_init(void)
     char snapshot[32];
     size_t written = 0;
     if (snapshot_timestamp(snapshot, sizeof(snapshot), &written) == 0)
-        vfs_write_file("/dev/rtc0.now", snapshot, written);
+        vfs_write_file("/Devices/rtc0.now", snapshot, written);
 
     return 0;
 }
@@ -145,5 +145,5 @@ int module_init(void)
 void module_exit(void)
 {
     devmgr_unregister_device("rtc0");
-    vfs_remove("/dev/rtc0.now");
+    vfs_remove("/Devices/rtc0.now");
 }

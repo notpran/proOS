@@ -75,7 +75,7 @@ int module_init(void)
 
     klog_emit(KLOG_INFO, message);
 
-    const char *file_name = "/proc/uptime";
+    const char *file_name = "/System/uptime";
     if (vfs_write_file(file_name, message, local_strlen(message)) < 0)
         klog_warn("time.module: vfs_write_file failed");
 

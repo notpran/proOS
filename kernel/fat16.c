@@ -1,4 +1,6 @@
 #include "fat16.h"
+#include "vfs.h"
+#include "klog.h"
 
 struct fat16_bpb
 {
@@ -18,6 +20,7 @@ static const uint8_t *volume_base = NULL;
 static size_t volume_size = 0;
 static struct fat16_bpb bpb;
 static int fat_ready = 0;
+static int fat_mounted = 0;
 
 static char to_upper(char c)
 {
@@ -82,6 +85,7 @@ static const uint8_t *find_root_entry(const char *path)
 int fat16_init(const void *base, size_t size)
 {
     fat_ready = 0;
+    fat_mounted = 0;
     if (!base || size < 512)
         return 0;
 
@@ -122,6 +126,76 @@ int fat16_ready(void)
 {
     return fat_ready;
 }
+
+static int build_mount_path(char *out, size_t cap, const char *name)
+{
+    if (!out || cap == 0)
+        return 0;
+
+    const char *prefix = "/Volumes/";
+    size_t pos = 0;
+    while (prefix[pos] && pos + 1 < cap)
+    {
+        out[pos] = prefix[pos];
+        ++pos;
+    }
+
+    const char *src = name && name[0] ? name : "Disk0";
+    size_t idx = 0;
+    while (src[idx] && pos + 1 < cap)
+        out[pos++] = src[idx++];
+
+    if (src[idx])
+        return 0;
+
+    out[pos] = '\0';
+    return 1;
+}
+
+static int fat16_vfs_list(void *ctx, const char *path, char *buffer, size_t buffer_size)
+{
+    (void)ctx;
+    if (!fat_ready)
+        return -1;
+
+    if (!path || path[0] == '\0')
+        return fat16_ls(buffer, buffer_size);
+
+    return -1;
+}
+
+static int fat16_vfs_read(void *ctx, const char *path, char *buffer, size_t buffer_size)
+{
+    (void)ctx;
+    if (!fat_ready || !path || path[0] == '\0' || !buffer || buffer_size == 0)
+        return -1;
+
+    return fat16_read(path, buffer, buffer_size);
+}
+
+static int fat16_vfs_write(void *ctx, const char *path, const char *data, size_t length, enum vfs_write_mode mode)
+{
+    (void)ctx;
+    (void)path;
+    (void)data;
+    (void)length;
+    (void)mode;
+    return -1;
+}
+
+static int fat16_vfs_remove(void *ctx, const char *path)
+{
+    (void)ctx;
+    (void)path;
+    return -1;
+}
+
+static const struct vfs_fs_ops fat16_vfs_ops = {
+    .list = fat16_vfs_list,
+    .read = fat16_vfs_read,
+    .write = fat16_vfs_write,
+    .remove = fat16_vfs_remove
+};
 
 static void trim_trailing_spaces(char *str)
 {
@@ -331,4 +405,25 @@ int fat16_read_file(const char *path, void *out, size_t max_len, size_t *out_siz
         *out_size = copied;
 
     return (copied == file_size) ? 0 : ((copied < file_size) ? 1 : 0);
+}
+
+int fat16_mount_volume(const char *name)
+{
+    if (!fat_ready)
+        return -1;
+    if (fat_mounted)
+        return 0;
+
+    char mount_path[VFS_MAX_PATH];
+    if (!build_mount_path(mount_path, sizeof(mount_path), name))
+        return -1;
+
+    if (vfs_write_file(mount_path, "", 0) < 0)
+        klog_warn("fat16: failed to seed volume entry");
+
+    if (vfs_mount(mount_path, &fat16_vfs_ops, NULL) < 0)
+        return -1;
+
+    fat_mounted = 1;
+    return 0;
 }

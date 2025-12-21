@@ -345,12 +345,12 @@ int module_init(void)
 
     const char *status = "keyboard: ready\n";
     size_t status_len = local_strlen(status);
-    vfs_write_file("/dev/ps2kbd0.status", status, status_len);
+    vfs_write_file("/Devices/ps2kbd0.status", status, status_len);
 
     char layout[512];
     int written = kb_dump_layout(layout, sizeof(layout));
     if (written > 0)
-        vfs_write_file("/dev/ps2kbd0.map", layout, (size_t)written);
+        vfs_write_file("/Devices/ps2kbd0.map", layout, (size_t)written);
 
     return 0;
 }
@@ -376,6 +376,6 @@ void module_exit(void)
         controller_created = 0;
     }
 
-    vfs_remove("/dev/ps2kbd0.status");
-    vfs_remove("/dev/ps2kbd0.map");
+    vfs_remove("/Devices/ps2kbd0.status");
+    vfs_remove("/Devices/ps2kbd0.map");
 }
