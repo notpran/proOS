@@ -24,6 +24,18 @@ static struct ramfs_volume temp_volume;
 
 static int mounts_initialized = 0;
 
+#define VFS_MAX_ALIASES 8
+
+struct vfs_alias
+{
+    int used;
+    char from[VFS_MAX_PATH];
+    size_t from_len;
+    char to[VFS_MAX_PATH];
+};
+
+static struct vfs_alias alias_table[VFS_MAX_ALIASES];
+
 /* Per-open descriptor record that keeps the resolved mount and remaining path. */
 struct vfs_handle
 {
@@ -116,6 +128,63 @@ static int normalize_path(const char *input, char *out, size_t capacity)
     return 0;
 }
 
+static void reset_aliases(void)
+{
+    for (size_t i = 0; i < VFS_MAX_ALIASES; ++i)
+    {
+        alias_table[i].used = 0;
+        alias_table[i].from[0] = '\0';
+        alias_table[i].from_len = 0;
+        alias_table[i].to[0] = '\0';
+    }
+}
+
+static const char *apply_alias(const char *path, char *buffer, size_t buffer_size)
+{
+    if (!path || !buffer || buffer_size == 0)
+        return path;
+
+    for (size_t i = 0; i < VFS_MAX_ALIASES; ++i)
+    {
+        if (!alias_table[i].used)
+            continue;
+        size_t prefix_len = alias_table[i].from_len;
+        if (prefix_len == 0)
+            continue;
+        if (local_strncmp(path, alias_table[i].from, prefix_len) != 0)
+            continue;
+        char next = path[prefix_len];
+        if (!(next == '\0' || next == '/'))
+            continue;
+
+        const char *target = alias_table[i].to;
+        size_t target_len = local_strlen(target);
+        const char *suffix = path + prefix_len;
+        if (*suffix == '/')
+            ++suffix;
+        size_t suffix_len = local_strlen(suffix);
+
+        size_t extra_slash = 0;
+        if (suffix_len > 0 && target_len > 0 && target[target_len - 1] != '/')
+            extra_slash = 1;
+        size_t total_len = target_len + suffix_len + extra_slash;
+        if (total_len + 1 >= buffer_size)
+            return path;
+
+        size_t pos = 0;
+        for (size_t j = 0; j < target_len; ++j)
+            buffer[pos++] = target[j];
+        if (extra_slash)
+            buffer[pos++] = '/';
+        for (size_t j = 0; j < suffix_len; ++j)
+            buffer[pos++] = suffix[j];
+        buffer[pos] = '\0';
+        return buffer;
+    }
+
+    return path;
+}
+
 static struct vfs_mount *acquire_mount_slot(void)
 {
     for (size_t i = 0; i < VFS_MAX_MOUNTS; ++i)
@@ -180,27 +249,13 @@ static struct vfs_mount *resolve_mount(const char *path, const char **relative_o
     return best;
 }
 
-static int path_has_separator(const char *path)
-{
-    if (!path)
-        return 0;
-    while (*path)
-    {
-        if (*path == '/')
-            return 1;
-        ++path;
-    }
-    return 0;
-}
-
 static int ramfs_list_adapter(void *ctx, const char *path, char *buffer, size_t buffer_size)
 {
     struct ramfs_volume *volume = (struct ramfs_volume *)ctx;
     if (!volume)
         return -1;
-    if (path && path[0] != '\0')
-        return -1;
-    return ramfs_volume_list(volume, buffer, buffer_size);
+    const char *dir = path ? path : "";
+    return ramfs_volume_list(volume, dir, buffer, buffer_size);
 }
 
 static int ramfs_read_adapter(void *ctx, const char *path, char *buffer, size_t buffer_size)
@@ -209,8 +264,6 @@ static int ramfs_read_adapter(void *ctx, const char *path, char *buffer, size_t 
     if (!volume || !path)
         return -1;
     if (path[0] == '\0')
-        return -1;
-    if (path_has_separator(path))
         return -1;
     return ramfs_volume_read(volume, path, buffer, buffer_size);
 }
@@ -222,8 +275,6 @@ static int ramfs_write_adapter(void *ctx, const char *path, const char *data, si
         return -1;
     if (path[0] == '\0')
         return -1;
-    if (path_has_separator(path))
-        return -1;
     if (mode == VFS_WRITE_REPLACE)
         return ramfs_volume_write(volume, path, data, length);
     return ramfs_volume_append(volume, path, data, length);
@@ -234,8 +285,6 @@ static int ramfs_remove_adapter(void *ctx, const char *path)
     struct ramfs_volume *volume = (struct ramfs_volume *)ctx;
     if (!volume || !path || path[0] == '\0')
         return -1;
-    if (path_has_separator(path))
-        return -1;
     return ramfs_volume_remove(volume, path);
 }
 
@@ -243,8 +292,6 @@ static int ramfs_mkdir_adapter(void *ctx, const char *path)
 {
     struct ramfs_volume *volume = (struct ramfs_volume *)ctx;
     if (!volume || !path || path[0] == '\0')
-        return -1;
-    if (path_has_separator(path))
         return -1;
     return ramfs_volume_mkdir(volume, path);
 }
@@ -312,6 +359,9 @@ int vfs_list(const char *path, char *buffer, size_t buffer_size)
     if (!effective || effective[0] == '\0')
         effective = "/";
 
+    char aliased[VFS_MAX_PATH];
+    effective = apply_alias(effective, aliased, sizeof(aliased));
+
     char normalized[VFS_MAX_PATH];
     if (normalize_path(effective, normalized, sizeof(normalized)) < 0)
         return -1;
@@ -329,8 +379,11 @@ int vfs_read_path(const char *path, char *buffer, size_t buffer_size)
     if (!path || !buffer || buffer_size == 0)
         return -1;
 
+    char aliased[VFS_MAX_PATH];
+    const char *effective = apply_alias(path, aliased, sizeof(aliased));
+
     char normalized[VFS_MAX_PATH];
-    if (normalize_path(path, normalized, sizeof(normalized)) < 0)
+    if (normalize_path(effective, normalized, sizeof(normalized)) < 0)
         return -1;
 
     const char *relative = NULL;
@@ -346,8 +399,11 @@ static int vfs_write_internal(const char *path, const char *data, size_t length,
     if (!path)
         return -1;
 
+    char aliased[VFS_MAX_PATH];
+    const char *effective = apply_alias(path, aliased, sizeof(aliased));
+
     char normalized[VFS_MAX_PATH];
-    if (normalize_path(path, normalized, sizeof(normalized)) < 0)
+    if (normalize_path(effective, normalized, sizeof(normalized)) < 0)
         return -1;
 
     const char *relative = NULL;
@@ -382,8 +438,11 @@ int vfs_open(const char *path)
     if (!path)
         return -1;
 
+    char aliased[VFS_MAX_PATH];
+    const char *effective = apply_alias(path, aliased, sizeof(aliased));
+
     char normalized[VFS_MAX_PATH];
-    if (normalize_path(path, normalized, sizeof(normalized)) < 0)
+    if (normalize_path(effective, normalized, sizeof(normalized)) < 0)
         return -1;
 
     const char *relative = NULL;
@@ -457,8 +516,11 @@ int vfs_remove(const char *path)
     if (!path)
         return -1;
 
+    char aliased[VFS_MAX_PATH];
+    const char *effective = apply_alias(path, aliased, sizeof(aliased));
+
     char normalized[VFS_MAX_PATH];
-    if (normalize_path(path, normalized, sizeof(normalized)) < 0)
+    if (normalize_path(effective, normalized, sizeof(normalized)) < 0)
         return -1;
 
     const char *relative = NULL;
@@ -474,8 +536,11 @@ int vfs_mkdir(const char *path)
     if (!path)
         return -1;
 
+    char aliased[VFS_MAX_PATH];
+    const char *effective = apply_alias(path, aliased, sizeof(aliased));
+
     char normalized[VFS_MAX_PATH];
-    if (normalize_path(path, normalized, sizeof(normalized)) < 0)
+    if (normalize_path(effective, normalized, sizeof(normalized)) < 0)
         return -1;
 
     const char *relative = NULL;
@@ -491,7 +556,8 @@ static void add_root_directory(const char *name)
     if (!name)
         return;
     struct ramfs_volume *root = ramfs_root_volume();
-    ramfs_volume_write(root, name, NULL, 0);
+    if (ramfs_volume_mkdir(root, name) < 0)
+        ramfs_volume_write(root, name, NULL, 0);
 }
 
 static void vfs_prepare_virtual_fs(void)
@@ -553,6 +619,8 @@ int vfs_init(void)
         return -1;
     }
 
+    reset_aliases();
+
     for (size_t i = 0; i < VFS_MAX_OPEN_FILES; ++i)
     {
         open_table[i].used = 0;
@@ -563,5 +631,100 @@ int vfs_init(void)
     vfs_prepare_virtual_fs();
 
     mounts_initialized = 1;
+    return 0;
+}
+
+size_t vfs_mount_count(void)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < VFS_MAX_MOUNTS; ++i)
+    {
+        if (mount_table[i].used)
+            ++count;
+    }
+    return count;
+}
+
+int vfs_mount_path_at(size_t index, char *buffer, size_t buffer_size)
+{
+    if (!buffer || buffer_size == 0)
+        return -1;
+
+    size_t seen = 0;
+    for (size_t i = 0; i < VFS_MAX_MOUNTS; ++i)
+    {
+        if (!mount_table[i].used)
+            continue;
+        if (seen == index)
+        {
+            size_t len = local_strlen(mount_table[i].mount_point);
+            if (len >= buffer_size)
+                len = buffer_size - 1;
+            for (size_t j = 0; j < len; ++j)
+                buffer[j] = mount_table[i].mount_point[j];
+            buffer[len] = '\0';
+            return 0;
+        }
+        ++seen;
+    }
+
+    return -1;
+}
+
+int vfs_register_alias(const char *from, const char *to)
+{
+    if (!from || !to)
+        return -1;
+
+    char norm_from[VFS_MAX_PATH];
+    char norm_to[VFS_MAX_PATH];
+
+    if (normalize_path(from, norm_from, sizeof(norm_from)) < 0)
+        return -1;
+    if (normalize_path(to, norm_to, sizeof(norm_to)) < 0)
+        return -1;
+
+    size_t from_len = local_strlen(norm_from);
+    if (from_len <= 1)
+        return -1;
+
+    size_t to_len = local_strlen(norm_to);
+    if (to_len == 0)
+        return -1;
+
+    if (from_len == to_len && local_strncmp(norm_from, norm_to, from_len) == 0)
+        return -1;
+
+    struct vfs_alias *slot = NULL;
+    for (size_t i = 0; i < VFS_MAX_ALIASES; ++i)
+    {
+        if (!alias_table[i].used)
+        {
+            if (!slot)
+                slot = &alias_table[i];
+            continue;
+        }
+        if (alias_table[i].from_len == from_len && local_strncmp(alias_table[i].from, norm_from, from_len) == 0)
+        {
+            slot = &alias_table[i];
+            break;
+        }
+    }
+
+    if (!slot)
+        return -1;
+
+    slot->used = 1;
+    slot->from_len = from_len;
+    for (size_t i = 0; i < from_len && i + 1 < sizeof(slot->from); ++i)
+        slot->from[i] = norm_from[i];
+    slot->from[(from_len < sizeof(slot->from)) ? from_len : sizeof(slot->from) - 1] = '\0';
+
+    if (to_len >= sizeof(slot->to))
+        to_len = sizeof(slot->to) - 1;
+    for (size_t i = 0; i < to_len; ++i)
+        slot->to[i] = norm_to[i];
+    slot->to[to_len] = '\0';
+
     return 0;
 }

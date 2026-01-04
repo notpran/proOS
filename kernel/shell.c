@@ -17,10 +17,12 @@
 #include "devmgr.h"
 #include "debug.h"
 #include "vbe.h"
+#include "volmgr.h"
 
 #define SHELL_PROMPT "proOS >> "
 #define INPUT_MAX 256
 #define SHELL_HISTORY_CAPACITY 32
+#define SHELL_TREE_MAX_DEPTH 8
 
 static char shell_history[SHELL_HISTORY_CAPACITY][INPUT_MAX];
 static size_t shell_history_count = 0;
@@ -297,6 +299,274 @@ static void shell_set_cwd(const char *path)
         return;
     if (shell_normalize_absolute(path, shell_cwd, sizeof(shell_cwd)) < 0)
         return;
+}
+
+static int segment_equals(const char *segment, size_t len, const char *text)
+{
+    size_t idx = 0;
+    while (idx < len && text[idx])
+    {
+        if (segment[idx] != text[idx])
+            return 0;
+        ++idx;
+    }
+    return idx == len && text[idx] == '\0';
+}
+
+static int shell_join_paths(const char *parent, const char *name, char *out, size_t capacity)
+{
+    if (!parent || !name || !out || capacity < 2)
+        return -1;
+
+    char temp[VFS_MAX_PATH];
+    size_t pos = 0;
+    size_t parent_len = str_len(parent);
+    if (parent_len == 0)
+        return -1;
+
+    if (parent_len == 1 && parent[0] == '/')
+    {
+        if (pos + 1 >= sizeof(temp))
+            return -1;
+        temp[pos++] = '/';
+    }
+    else
+    {
+        if (parent_len >= sizeof(temp))
+            return -1;
+        for (size_t i = 0; i < parent_len && pos + 1 < sizeof(temp); ++i)
+            temp[pos++] = parent[i];
+        if (temp[pos - 1] != '/')
+        {
+            if (pos + 1 >= sizeof(temp))
+                return -1;
+            temp[pos++] = '/';
+        }
+    }
+
+    size_t idx = 0;
+    while (name[idx] && pos + 1 < sizeof(temp))
+        temp[pos++] = name[idx++];
+
+    if (name[idx])
+        return -1;
+
+    temp[pos] = '\0';
+    return shell_normalize_absolute(temp, out, capacity);
+}
+
+static void shell_tree_print_line(int depth, const char *name, int is_dir)
+{
+    if (!name)
+        return;
+
+    char line[160];
+    size_t pos = 0;
+    for (int i = 0; i < depth; ++i)
+    {
+        if (pos + 2 >= sizeof(line))
+            break;
+        line[pos++] = '|';
+        line[pos++] = ' ';
+    }
+    if (pos + 3 < sizeof(line))
+    {
+        line[pos++] = '+';
+        line[pos++] = '-';
+        line[pos++] = ' ';
+    }
+    size_t name_len = str_len(name);
+    for (size_t i = 0; i < name_len && pos + 1 < sizeof(line); ++i)
+        line[pos++] = name[i];
+    if (is_dir && pos + 1 < sizeof(line))
+        line[pos++] = '/';
+    line[pos] = '\0';
+    vga_write_line(line);
+}
+
+static void shell_tree_walk(const char *path, int depth)
+{
+    if (!path)
+        return;
+
+    char listing[VFS_INLINE_CAP];
+    int listed = vfs_list(path, listing, sizeof(listing));
+    if (listed <= 0)
+        return;
+
+    char *cursor = listing;
+    while (*cursor)
+    {
+        char *entry = cursor;
+        while (*cursor && *cursor != '\n')
+            ++cursor;
+        if (*cursor == '\n')
+        {
+            *cursor = '\0';
+            ++cursor;
+        }
+
+        if (entry[0] == '\0')
+            continue;
+
+        int is_dir = 0;
+        size_t entry_len = str_len(entry);
+        if (entry_len > 0 && entry[entry_len - 1] == '/')
+        {
+            is_dir = 1;
+            entry[entry_len - 1] = '\0';
+            --entry_len;
+        }
+
+        if (entry_len == 0)
+            continue;
+
+        char absolute[VFS_MAX_PATH];
+        if (shell_join_paths(path, entry, absolute, sizeof(absolute)) < 0)
+            continue;
+
+        shell_tree_print_line(depth, entry, is_dir);
+
+        if (is_dir)
+        {
+            if (depth + 1 >= SHELL_TREE_MAX_DEPTH)
+            {
+                shell_tree_print_line(depth + 1, "...", 0);
+                continue;
+            }
+            shell_tree_walk(absolute, depth + 1);
+        }
+    }
+}
+
+static void shell_describe_location(char *volume, size_t volume_cap, char *relative, size_t relative_cap)
+{
+    if (!volume || volume_cap == 0 || !relative || relative_cap == 0)
+        return;
+
+    volume[0] = '\0';
+    relative[0] = '\0';
+
+    const char *cwd = shell_cwd;
+    if (!cwd || cwd[0] == '\0')
+        return;
+
+    if (shell_str_equals(cwd, "/"))
+    {
+        const char *root = "Root";
+        size_t pos = 0;
+        while (root[pos] && pos + 1 < volume_cap)
+        {
+            volume[pos] = root[pos];
+            ++pos;
+        }
+        volume[pos] = '\0';
+        if (relative_cap > 1)
+        {
+            relative[0] = '/';
+            relative[1] = '\0';
+        }
+        return;
+    }
+
+    const char *cursor = cwd;
+    if (*cursor == '/')
+        ++cursor;
+    const char *first = cursor;
+    size_t first_len = 0;
+    while (first[first_len] && first[first_len] != '/')
+        ++first_len;
+
+    if (first_len == 0)
+        return;
+
+    const char *after_first = first + first_len;
+    if (segment_equals(first, first_len, "Volumes"))
+    {
+        if (*after_first == '/')
+            ++after_first;
+        if (*after_first == '\0')
+        {
+            const char *volumes = "Volumes";
+            size_t pos = 0;
+            while (volumes[pos] && pos + 1 < volume_cap)
+            {
+                volume[pos] = volumes[pos];
+                ++pos;
+            }
+            volume[pos] = '\0';
+            if (relative_cap > 1)
+            {
+                relative[0] = '/';
+                relative[1] = '\0';
+            }
+            return;
+        }
+
+        const char *second = after_first;
+        size_t second_len = 0;
+        while (second[second_len] && second[second_len] != '/')
+            ++second_len;
+
+        size_t copy_len = (second_len < volume_cap - 1) ? second_len : (volume_cap - 1);
+        for (size_t i = 0; i < copy_len; ++i)
+            volume[i] = second[i];
+        volume[copy_len] = '\0';
+
+        const char *rest = second + second_len;
+        if (*rest == '/')
+            ++rest;
+        if (*rest == '\0')
+        {
+            if (relative_cap > 1)
+            {
+                relative[0] = '/';
+                relative[1] = '\0';
+            }
+        }
+        else
+        {
+            size_t pos = 0;
+            if (relative_cap > 1)
+            {
+                relative[pos++] = '/';
+                size_t idx = 0;
+                while (rest[idx] && pos < relative_cap - 1)
+                    relative[pos++] = rest[idx++];
+                relative[pos] = '\0';
+            }
+        }
+        return;
+    }
+
+    size_t volume_copy = (first_len < volume_cap - 1) ? first_len : (volume_cap - 1);
+    for (size_t i = 0; i < volume_copy; ++i)
+        volume[i] = first[i];
+    volume[volume_copy] = '\0';
+
+    const char *rest = after_first;
+    if (*rest == '/')
+        ++rest;
+    if (*rest == '\0')
+    {
+        if (relative_cap > 1)
+        {
+            relative[0] = '/';
+            relative[1] = '\0';
+        }
+    }
+    else
+    {
+        size_t pos = 0;
+        if (relative_cap > 1)
+        {
+            relative[pos++] = '/';
+            size_t idx = 0;
+            while (rest[idx] && pos < relative_cap - 1)
+                relative[pos++] = rest[idx++];
+            relative[pos] = '\0';
+        }
+    }
 }
 
 static int parse_positive_int(const char *text, int *out_value)
@@ -578,11 +848,15 @@ static void command_help(void)
     vga_write_line("  memdump <addr> [len] - hex dump memory");
     vga_write_line("  reboot - reset the machine");
     vga_write_line("  ls [path] - list directory contents");
+    vga_write_line("  tree [path] - display directory tree");
     vga_write_line("  cd [path] - change working directory");
+    vga_write_line("  whereami - show current volume/path");
     vga_write_line("  cat <file> - print file contents");
     vga_write_line("  mkdir <path> - create directory");
     vga_write_line("  touch <path> - create empty file");
     vga_write_line("  rm <path> - remove file or directory");
+    vga_write_line("  volumes - list detected volumes");
+    vga_write_line("  mount - list active mounts");
     vga_write_line("  mod    - module control (list/load/unload .kmd)");
     vga_write_line("  gfx    - draw compositor demo");
     vga_write_line("  kdlg   - show kernel log");
@@ -818,6 +1092,71 @@ static void command_ls(const char *args)
     }
 }
 
+static void command_tree(const char *args)
+{
+    char provided[VFS_MAX_PATH];
+    char absolute[VFS_MAX_PATH];
+
+    const char *trimmed = skip_spaces(args ? args : "");
+    const char *target = resolve_absolute_path(NULL, absolute, sizeof(absolute));
+    if (!target)
+    {
+        vga_write_line("tree: unable to resolve current directory");
+        return;
+    }
+
+    if (*trimmed)
+    {
+        size_t idx = 0;
+        while (trimmed[idx] && trimmed[idx] != ' ' && idx + 1 < sizeof(provided))
+        {
+            provided[idx] = trimmed[idx];
+            ++idx;
+        }
+        if (trimmed[idx] != '\0' && trimmed[idx] != ' ')
+        {
+            vga_write_line("tree: path too long");
+            return;
+        }
+        provided[idx] = '\0';
+
+        const char *rest = skip_spaces(trimmed + idx);
+        if (*rest)
+        {
+            vga_write_line("Usage: tree [path]");
+            return;
+        }
+
+        target = resolve_absolute_path(provided, absolute, sizeof(absolute));
+        if (!target)
+        {
+            vga_write_line("tree: invalid path");
+            return;
+        }
+    }
+
+    char probe[64];
+    int listed = vfs_list(target, probe, sizeof(probe));
+    if (listed < 0)
+    {
+        int fd = vfs_open(target);
+        if (fd >= 0)
+        {
+            vfs_close(fd);
+            vga_write_line("tree: not a directory");
+        }
+        else
+        {
+            vga_write_line("tree: path not found");
+        }
+        return;
+    }
+
+    vga_write_line(target);
+    if (listed > 0)
+        shell_tree_walk(target, 0);
+}
+
 static void command_cat(const char *arg)
 {
     const char *name_ptr = skip_spaces(arg);
@@ -926,6 +1265,42 @@ static void command_cd(const char *args)
     }
 
     shell_set_cwd(resolved);
+}
+
+static void command_whereami(void)
+{
+    char volume[32];
+    char rel[VFS_MAX_PATH];
+    shell_describe_location(volume, sizeof(volume), rel, sizeof(rel));
+
+    if (volume[0] == '\0')
+    {
+        const char *fallback = "Root";
+        size_t pos = 0;
+        while (fallback[pos] && pos + 1 < sizeof(volume))
+        {
+            volume[pos] = fallback[pos];
+            ++pos;
+        }
+        volume[pos] = '\0';
+    }
+
+    const char *path_display = rel;
+    if (path_display[0] == '\0')
+    {
+        path_display = shell_cwd;
+        if (!path_display || path_display[0] == '\0')
+            path_display = "/";
+    }
+
+    char line[160];
+    size_t pos = 0;
+    buffer_append(line, &pos, sizeof(line), "Volume: ");
+    buffer_append(line, &pos, sizeof(line), volume);
+    buffer_append(line, &pos, sizeof(line), " Path: ");
+    buffer_append(line, &pos, sizeof(line), path_display);
+    line[pos] = '\0';
+    vga_write_line(line);
 }
 
 static int shell_copy_token(const char *input, char *buffer, size_t capacity)
@@ -1066,6 +1441,68 @@ static void command_rm(const char *args)
         vga_write_line("Removed.");
     else
         vga_write_line("rm: failed");
+}
+
+static void command_volumes(void)
+{
+    size_t count = volmgr_volume_count();
+    if (count == 0)
+    {
+        vga_write_line("No volumes detected.");
+        return;
+    }
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        const struct volume_info *info = volmgr_volume_at(i);
+        if (!info)
+            continue;
+
+        const char *name = (info->name && info->name[0]) ? info->name : "(unnamed)";
+        const char *mount_path = (info->mount_path && info->mount_path[0]) ? info->mount_path : "(unmounted)";
+
+        char line[160];
+        size_t pos = 0;
+        buffer_append(line, &pos, sizeof(line), name);
+        buffer_append(line, &pos, sizeof(line), " -> ");
+        buffer_append(line, &pos, sizeof(line), mount_path);
+        line[pos] = '\0';
+        vga_write_line(line);
+    }
+}
+
+static void command_mount(const char *args)
+{
+    const char *trimmed = skip_spaces(args ? args : "");
+    if (*trimmed)
+    {
+        vga_write_line("Usage: mount");
+        return;
+    }
+
+    size_t count = vfs_mount_count();
+    if (count == 0)
+    {
+        vga_write_line("No mounts active.");
+        return;
+    }
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        char path[VFS_MAX_PATH];
+        if (vfs_mount_path_at(i, path, sizeof(path)) < 0)
+            continue;
+
+        char line[192];
+        size_t pos = 0;
+        char index_buf[32];
+        write_u64((uint64_t)(i + 1u), index_buf);
+        buffer_append(line, &pos, sizeof(line), index_buf);
+        buffer_append(line, &pos, sizeof(line), ": ");
+        buffer_append(line, &pos, sizeof(line), path);
+        line[pos] = '\0';
+        vga_write_line(line);
+    }
 }
 
 static void command_mod_list(void)
@@ -2148,6 +2585,14 @@ static void shell_execute(char *line)
     {
         command_ls(cursor + 2);
     }
+    else if (shell_str_equals(cursor, "tree"))
+    {
+        command_tree("");
+    }
+    else if (shell_str_starts_with(cursor, "tree "))
+    {
+        command_tree(cursor + 4);
+    }
     else if (shell_str_equals(cursor, "cd"))
     {
         command_cd("");
@@ -2155,6 +2600,10 @@ static void shell_execute(char *line)
     else if (shell_str_starts_with(cursor, "cd "))
     {
         command_cd(cursor + 2);
+    }
+    else if (shell_str_equals(cursor, "whereami"))
+    {
+        command_whereami();
     }
     else if (shell_str_equals(cursor, "cat") || shell_str_starts_with(cursor, "cat "))
     {
@@ -2171,6 +2620,14 @@ static void shell_execute(char *line)
     else if (shell_str_equals(cursor, "rm") || shell_str_starts_with(cursor, "rm "))
     {
         command_rm(cursor + 2);
+    }
+    else if (shell_str_equals(cursor, "volumes"))
+    {
+        command_volumes();
+    }
+    else if (shell_str_equals(cursor, "mount") || shell_str_starts_with(cursor, "mount "))
+    {
+        command_mount(cursor + 5);
     }
     else if (shell_str_equals(cursor, "tasks") || shell_str_equals(cursor, "proc_list"))
     {

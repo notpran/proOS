@@ -23,7 +23,7 @@ struct ramfs_volume
 };
 
 void ramfs_volume_init(struct ramfs_volume *volume);
-int ramfs_volume_list(struct ramfs_volume *volume, char *buffer, size_t buffer_size);
+int ramfs_volume_list(struct ramfs_volume *volume, const char *directory, char *buffer, size_t buffer_size);
 int ramfs_volume_read(struct ramfs_volume *volume, const char *name, char *out, size_t out_size);
 int ramfs_volume_append(struct ramfs_volume *volume, const char *name, const char *data, size_t length);
 int ramfs_volume_write(struct ramfs_volume *volume, const char *name, const char *data, size_t length);

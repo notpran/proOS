@@ -39,4 +39,8 @@ int vfs_read(int fd, void *buffer, size_t size);
 int vfs_write(int fd, const void *buffer, size_t size);
 int vfs_close(int fd);
 
+size_t vfs_mount_count(void);
+int vfs_mount_path_at(size_t index, char *buffer, size_t buffer_size);
+int vfs_register_alias(const char *from, const char *to);
+
 #endif

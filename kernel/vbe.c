@@ -782,17 +782,16 @@ static int try_use_embedded_font(void)
         return 0;
 
     struct parsed_font candidate;
-    if (parse_psf_font(EMBEDDED_FONT_START, size, &candidate))
-        return adopt_font_candidate(&candidate, NULL, 0);
-
     uint8_t *glyph_blob = NULL;
-    if (parse_bdf_font((const char *)EMBEDDED_FONT_START, size, &candidate, &glyph_blob))
-    {
-        if (glyph_blob && adopt_font_candidate(&candidate, glyph_blob, 0))
-            return 1;
-    }
+    if (!parse_bdf_font((const char *)EMBEDDED_FONT_START, size, &candidate, &glyph_blob))
+        return 0;
+    if (!glyph_blob)
+        return 0;
 
-    return 0;
+    if (!adopt_font_candidate(&candidate, glyph_blob, 1))
+        return 0;
+
+    return 1;
 #endif
 }
 

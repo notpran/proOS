@@ -37,6 +37,30 @@ static void mem_copy(char *dst, const char *src, size_t len)
         dst[i] = src[i];
 }
 
+static int str_starts_with(const char *str, const char *prefix)
+{
+    size_t idx = 0;
+    while (prefix[idx])
+    {
+        if (str[idx] != prefix[idx])
+            return 0;
+        ++idx;
+    }
+    return 1;
+}
+
+static int path_is_valid(const char *name)
+{
+    if (!name || name[0] == '\0')
+        return 0;
+    size_t len = str_len(name);
+    if (len >= RAMFS_MAX_NAME)
+        return 0;
+    if (name[0] == '/' || name[len - 1] == '/')
+        return 0;
+    return 1;
+}
+
 static struct ramfs_entry *find_entry(struct ramfs_volume *volume, const char *name)
 {
     if (!volume)
@@ -49,9 +73,43 @@ static struct ramfs_entry *find_entry(struct ramfs_volume *volume, const char *n
     return NULL;
 }
 
+static int ensure_parent_directory(struct ramfs_volume *volume, const char *name)
+{
+    if (!volume || !name)
+        return 0;
+
+    size_t len = str_len(name);
+    size_t last_slash = (size_t)(-1);
+    for (size_t i = 0; i < len; ++i)
+    {
+        if (name[i] == '/')
+            last_slash = i;
+    }
+
+    if (last_slash == (size_t)(-1))
+        return 1;
+
+    if (last_slash == 0 || last_slash >= RAMFS_MAX_NAME)
+        return 0;
+
+    char parent[RAMFS_MAX_NAME];
+    size_t parent_len = last_slash;
+    for (size_t i = 0; i < parent_len && i + 1 < sizeof(parent); ++i)
+        parent[i] = name[i];
+    parent[parent_len] = '\0';
+
+    struct ramfs_entry *entry = find_entry(volume, parent);
+    if (!entry || !entry->is_directory)
+        return 0;
+    return 1;
+}
+
 static struct ramfs_entry *create_entry(struct ramfs_volume *volume, const char *name, int directory)
 {
-    if (!volume)
+    if (!volume || !name)
+        return NULL;
+
+    if (!path_is_valid(name))
         return NULL;
 
     struct ramfs_entry *existing = find_entry(volume, name);
@@ -61,6 +119,9 @@ static struct ramfs_entry *create_entry(struct ramfs_volume *volume, const char 
             return existing;
         return NULL;
     }
+
+    if (!ensure_parent_directory(volume, name))
+        return NULL;
 
     for (size_t i = 0; i < RAMFS_MAX_FILES; ++i)
     {
@@ -92,27 +153,83 @@ void ramfs_volume_init(struct ramfs_volume *volume)
     }
 }
 
-int ramfs_volume_list(struct ramfs_volume *volume, char *buffer, size_t buffer_size)
+int ramfs_volume_list(struct ramfs_volume *volume, const char *directory, char *buffer, size_t buffer_size)
 {
     if (!volume || !buffer || buffer_size == 0)
-        return 0;
+        return -1;
+
+    const char *dir = directory ? directory : "";
+    size_t dir_len = str_len(dir);
+    int is_root = dir_len == 0;
+
+    if (!is_root)
+    {
+        if (!path_is_valid(dir))
+            return -1;
+        struct ramfs_entry *dir_entry = find_entry(volume, dir);
+        if (!dir_entry || !dir_entry->is_directory)
+            return -1;
+    }
 
     size_t written = 0;
 
     for (size_t i = 0; i < RAMFS_MAX_FILES; ++i)
     {
-        if (!volume->files[i].used)
+        struct ramfs_entry *entry = &volume->files[i];
+        if (!entry->used)
             continue;
 
-        size_t name_len = str_len(volume->files[i].name);
-        size_t extra = volume->files[i].is_directory ? 1 : 0;
-        if (written + name_len + extra + 1 >= buffer_size)
+        const char *name = entry->name;
+
+        const char *child = NULL;
+        if (is_root)
+        {
+            int nested = 0;
+            for (size_t j = 0; name[j]; ++j)
+            {
+                if (name[j] == '/')
+                {
+                    nested = 1;
+                    break;
+                }
+            }
+            if (nested)
+                continue;
+            child = name;
+        }
+        else
+        {
+            if (str_len(name) <= dir_len)
+                continue;
+            if (!str_starts_with(name, dir))
+                continue;
+            if (name[dir_len] != '/')
+                continue;
+            child = name + dir_len + 1;
+            if (*child == '\0')
+                continue;
+            int nested = 0;
+            for (size_t j = 0; child[j]; ++j)
+            {
+                if (child[j] == '/')
+                {
+                    nested = 1;
+                    break;
+                }
+            }
+            if (nested)
+                continue;
+        }
+
+        size_t child_len = str_len(child);
+        size_t extra = entry->is_directory ? 1 : 0;
+        if (written + child_len + extra + 1 >= buffer_size)
             break;
 
-        for (size_t j = 0; j < name_len; ++j)
-            buffer[written++] = volume->files[i].name[j];
+        for (size_t j = 0; j < child_len; ++j)
+            buffer[written++] = child[j];
 
-        if (volume->files[i].is_directory)
+        if (entry->is_directory)
             buffer[written++] = '/';
 
         buffer[written++] = '\n';
@@ -120,7 +237,6 @@ int ramfs_volume_list(struct ramfs_volume *volume, char *buffer, size_t buffer_s
 
     if (written > 0)
         --written;
-
     buffer[written] = '\0';
     return (int)written;
 }
@@ -128,6 +244,9 @@ int ramfs_volume_list(struct ramfs_volume *volume, char *buffer, size_t buffer_s
 int ramfs_volume_read(struct ramfs_volume *volume, const char *name, char *out, size_t out_size)
 {
     if (!volume || !name || !out || out_size == 0)
+        return -1;
+
+    if (!path_is_valid(name))
         return -1;
 
     struct ramfs_entry *file = find_entry(volume, name);
@@ -146,6 +265,9 @@ int ramfs_volume_read(struct ramfs_volume *volume, const char *name, char *out, 
 int ramfs_volume_append(struct ramfs_volume *volume, const char *name, const char *data, size_t length)
 {
     if (!volume || !name || !data || length == 0)
+        return -1;
+
+    if (!path_is_valid(name))
         return -1;
 
     struct ramfs_entry *file = create_entry(volume, name, 0);
@@ -167,6 +289,9 @@ int ramfs_volume_append(struct ramfs_volume *volume, const char *name, const cha
 int ramfs_volume_write(struct ramfs_volume *volume, const char *name, const char *data, size_t length)
 {
     if (!volume || !name)
+        return -1;
+
+    if (!path_is_valid(name))
         return -1;
 
     struct ramfs_entry *file = create_entry(volume, name, 0);
@@ -197,21 +322,53 @@ int ramfs_volume_remove(struct ramfs_volume *volume, const char *name)
     if (!volume || !name)
         return -1;
 
+    if (!path_is_valid(name))
+        return -1;
+
     struct ramfs_entry *file = find_entry(volume, name);
     if (!file)
         return -1;
+
+    int was_directory = file->is_directory ? 1 : 0;
 
     file->used = 0;
     file->size = 0;
     file->is_directory = 0;
     file->name[0] = '\0';
     file->data[0] = '\0';
+
+    if (was_directory)
+    {
+        size_t prefix_len = str_len(name);
+        for (size_t i = 0; i < RAMFS_MAX_FILES; ++i)
+        {
+            struct ramfs_entry *child = &volume->files[i];
+            if (!child->used)
+                continue;
+            size_t name_len = str_len(child->name);
+            if (name_len <= prefix_len)
+                continue;
+            if (!str_starts_with(child->name, name))
+                continue;
+            if (child->name[prefix_len] != '/')
+                continue;
+            child->used = 0;
+            child->size = 0;
+            child->is_directory = 0;
+            child->name[0] = '\0';
+            child->data[0] = '\0';
+        }
+    }
+
     return 0;
 }
 
 int ramfs_volume_mkdir(struct ramfs_volume *volume, const char *name)
 {
     if (!volume || !name)
+        return -1;
+
+    if (!path_is_valid(name))
         return -1;
 
     struct ramfs_entry *entry = create_entry(volume, name, 1);
@@ -241,7 +398,7 @@ void ramfs_init(void)
 
 int ramfs_list(char *buffer, size_t buffer_size)
 {
-    return ramfs_volume_list(ramfs_root_volume(), buffer, buffer_size);
+    return ramfs_volume_list(ramfs_root_volume(), "", buffer, buffer_size);
 }
 
 int ramfs_read(const char *name, char *out, size_t out_size)

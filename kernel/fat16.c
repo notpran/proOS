@@ -2,6 +2,45 @@
 
 #include "fatfs.h"
 #include "klog.h"
+#include "vfs.h"
+
+static int join_path(const char *base, const char *leaf, char *out, size_t capacity)
+{
+    if (!base || !leaf || !out || capacity == 0)
+        return -1;
+
+    size_t pos = 0;
+    for (size_t i = 0; base[i] && pos + 1 < capacity; ++i)
+        out[pos++] = base[i];
+
+    if (pos == 0 || out[pos - 1] != '/')
+    {
+        if (pos + 1 >= capacity)
+            return -1;
+        out[pos++] = '/';
+    }
+
+    for (size_t i = 0; leaf[i] && pos + 1 < capacity; ++i)
+        out[pos++] = leaf[i];
+
+    if (pos >= capacity)
+        return -1;
+    out[pos] = '\0';
+    return 0;
+}
+
+static void ensure_directory(const char *path)
+{
+    if (!path || path[0] == '\0')
+        return;
+
+    if (vfs_mkdir(path) == 0)
+        return;
+
+    char probe[8];
+    if (vfs_list(path, probe, sizeof(probe)) >= 0)
+        return;
+}
 
 static struct fatfs_volume g_fat_volume;
 static int g_fat_ready = 0;
@@ -39,7 +78,34 @@ int fat16_mount_volume(const char *name)
 {
     if (!fat16_ready())
         return -1;
-    return fatfs_mount(&g_fat_volume, name);
+    if (fatfs_mount(&g_fat_volume, name) < 0)
+        return -1;
+
+    if (g_fat_volume.mount_path[0] != '\0')
+    {
+        char users_path[VFS_MAX_PATH];
+        if (join_path(g_fat_volume.mount_path, "Users", users_path, sizeof(users_path)) == 0)
+        {
+            ensure_directory(users_path);
+
+            char pran_path[VFS_MAX_PATH];
+            if (join_path(users_path, "pran", pran_path, sizeof(pran_path)) == 0)
+            {
+                ensure_directory(pran_path);
+
+                char docs_path[VFS_MAX_PATH];
+                if (join_path(pran_path, "Documents", docs_path, sizeof(docs_path)) == 0)
+                    ensure_directory(docs_path);
+            }
+
+            if (vfs_register_alias("/Users", users_path) == 0)
+                klog_info("fat: /Users aliased to persistent volume");
+            else
+                klog_warn("fat: failed to alias /Users");
+        }
+    }
+
+    return 0;
 }
 
 int fat16_ls(char *out, size_t max_len)
