@@ -5,6 +5,8 @@
 #include <stdint.h>
 
 #include "config.h"
+#include "spinlock.h"
+#include "ipc_types.h"
 
 #define MAX_PROCS       CONFIG_MAX_PROCS
 #define PROC_STACK_SIZE CONFIG_PROC_STACK_SIZE
@@ -31,6 +33,37 @@ struct context
     uint32_t esp;
 };
 
+struct ipc_mailbox_slot
+{
+    uint8_t used;
+    pid_t sender;
+    uint32_t flags;
+    uint32_t size;
+    uint8_t data[CONFIG_MSG_DATA_MAX];
+};
+
+struct ipc_mailbox_state
+{
+    spinlock_t lock;
+    struct ipc_mailbox_slot slots[CONFIG_MSG_QUEUE_LEN];
+    uint8_t count;
+    pid_t waiters[CONFIG_IPC_ENDPOINT_WAITERS];
+    uint8_t waiter_count;
+};
+
+struct ipc_cap_entry
+{
+    uint8_t used;
+    pid_t peer;
+    uint32_t rights;
+};
+
+struct ipc_share_link
+{
+    uint8_t used;
+    int share_id;
+};
+
 struct process
 {
     int pid;
@@ -41,6 +74,7 @@ struct process
     int channel_slots[CONFIG_PROCESS_CHANNEL_SLOTS];
     uint8_t channel_count;
     int wait_channel;
+    int ipc_waiting;
     int exit_code;
     thread_kind_t kind;
     uint8_t base_priority;
@@ -52,6 +86,11 @@ struct process
     struct process *next_run;
     struct process *next_sleep;
     process_entry_t entry;
+    struct ipc_mailbox_state ipc_mailbox;
+    struct ipc_cap_entry ipc_caps[CONFIG_IPC_CAPACITY_PER_PROC];
+    uint8_t ipc_cap_count;
+    struct ipc_share_link ipc_shares[CONFIG_IPC_MAX_SHARED_PER_PROC];
+    uint8_t ipc_share_count;
 };
 
 struct process_info

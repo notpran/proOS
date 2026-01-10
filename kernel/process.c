@@ -169,8 +169,10 @@ static struct process *alloc_process_slot(void)
 			processes[i].state = PROC_UNUSED;
 			processes[i].stack_size = PROC_STACK_SIZE;
 			processes[i].wait_channel = -1;
+			processes[i].ipc_waiting = 0;
 			for (size_t slot = 0; slot < CONFIG_PROCESS_CHANNEL_SLOTS; ++slot)
 				processes[i].channel_slots[slot] = -1;
+			ipc_attach_process(&processes[i]);
 			return &processes[i];
 		}
 	}
@@ -414,6 +416,7 @@ static void reclaim_zombie(struct process *proc)
 	proc->state = PROC_UNUSED;
 	proc->channel_count = 0;
 	proc->wait_channel = -1;
+	proc->ipc_waiting = 0;
 	proc->exit_code = 0;
 	proc->ctx.esp = 0;
 	proc->entry = NULL;
@@ -425,6 +428,7 @@ static void reclaim_zombie(struct process *proc)
 	proc->dynamic_priority = proc->base_priority;
 	for (size_t slot = 0; slot < CONFIG_PROCESS_CHANNEL_SLOTS; ++slot)
 		proc->channel_slots[slot] = -1;
+	ipc_attach_process(proc);
 
 	scheduler_send_event(SCHED_EVENT_RECLAIM, pid, exit_code, PROC_UNUSED);
 }
@@ -547,6 +551,7 @@ void process_system_init(void)
 		processes[i].stack_size = PROC_STACK_SIZE;
 		processes[i].channel_count = 0;
 		processes[i].wait_channel = -1;
+		processes[i].ipc_waiting = 0;
 		processes[i].exit_code = 0;
 		processes[i].on_run_queue = 0;
 		processes[i].next_run = NULL;
@@ -556,6 +561,7 @@ void process_system_init(void)
 		processes[i].time_slice_remaining = 0;
 		for (size_t slot = 0; slot < CONFIG_PROCESS_CHANNEL_SLOTS; ++slot)
 			processes[i].channel_slots[slot] = -1;
+		ipc_attach_process(&processes[i]);
 	}
 
 	for (int i = 0; i < SCHED_PRIORITY_LEVELS; ++i)
