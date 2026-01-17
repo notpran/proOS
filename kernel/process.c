@@ -543,7 +543,7 @@ static struct process *scheduler_create_thread(process_entry_t entry, size_t sta
 static void idle_thread(void)
 {
 	for (;;)
-		__asm__ __volatile__("hlt");
+		__asm__ __volatile__("sti\n\thlt");
 }
 
 void process_system_init(void)

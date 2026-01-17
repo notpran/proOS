@@ -85,12 +85,8 @@ static char translate_scancode(uint8_t scancode)
     return keymap[scancode];
 }
 
-static void keyboard_irq_handler(struct regs *frame)
+static void keyboard_handle_scancode(uint8_t scancode)
 {
-    (void)frame;
-
-    uint8_t scancode = inb(KB_DATA_PORT);
-
     if (scancode == 0xE0)
     {
         extended_active = 1;
@@ -168,6 +164,14 @@ static void keyboard_irq_handler(struct regs *frame)
     }
 }
 
+static void keyboard_irq_handler(struct regs *frame)
+{
+    (void)frame;
+
+    uint8_t scancode = inb(KB_DATA_PORT);
+    keyboard_handle_scancode(scancode);
+}
+
 void kb_init(void)
 {
     head = 0;
@@ -185,6 +189,17 @@ char kb_getchar(void)
     char c = buffer[tail];
     tail = (tail + 1U) % KB_BUFFER_SIZE;
     return c;
+}
+
+int kb_poll(void)
+{
+    uint8_t status = inb(0x64);
+    if ((status & 0x01u) == 0u)
+        return 0;
+
+    uint8_t scancode = inb(KB_DATA_PORT);
+    keyboard_handle_scancode(scancode);
+    return 1;
 }
 
 int kb_dump_layout(char *out, size_t max_len)

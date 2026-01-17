@@ -29,6 +29,22 @@ static struct klog_module_entry module_table[CONFIG_KLOG_MAX_MODULES];
 static int proc_sink_enabled = 0;
 static int proc_sink_guard = 0;
 
+enum log_sink_kind
+{
+    LOG_SINK_KERNEL = 0,
+    LOG_SINK_NET = 1,
+    LOG_SINK_IPC = 2,
+    LOG_SINK_COUNT
+};
+
+static const char *log_sink_paths[LOG_SINK_COUNT] = {
+    "/System/Logs/kernel.log",
+    "/System/Logs/net.log",
+    "/System/Logs/ipc.log"
+};
+
+static int logs_directory_ready = 0;
+
 static uint32_t save_and_cli(void)
 {
     uint32_t flags;
@@ -72,6 +88,43 @@ static int string_equals(const char *a, const char *b)
     return a[idx] == b[idx];
 }
 
+static char to_lower_ascii(char ch)
+{
+    if (ch >= 'A' && ch <= 'Z')
+        return (char)(ch + ('a' - 'A'));
+    return ch;
+}
+
+static int string_equals_ignore_case(const char *a, const char *b)
+{
+    if (!a || !b)
+        return 0;
+    size_t idx = 0;
+    while (a[idx] && b[idx])
+    {
+        if (to_lower_ascii(a[idx]) != to_lower_ascii(b[idx]))
+            return 0;
+        ++idx;
+    }
+    return a[idx] == b[idx];
+}
+
+static int string_has_prefix_ignore_case(const char *text, const char *prefix)
+{
+    if (!text || !prefix)
+        return 0;
+    size_t idx = 0;
+    while (prefix[idx])
+    {
+        if (!text[idx])
+            return 0;
+        if (to_lower_ascii(text[idx]) != to_lower_ascii(prefix[idx]))
+            return 0;
+        ++idx;
+    }
+    return 1;
+}
+
 static void klog_reset_internal(void)
 {
     klog_count = 0;
@@ -109,6 +162,15 @@ static void ensure_ready(void)
 {
     if (!klog_ready)
         klog_init();
+}
+
+static void ensure_logs_directory(void)
+{
+    if (logs_directory_ready)
+        return;
+    vfs_mkdir("/System");
+    vfs_mkdir("/System/Logs");
+    logs_directory_ready = 1;
 }
 
 struct klog_ipc_event
@@ -194,6 +256,31 @@ static int effective_threshold_for(const char *module)
         threshold = entry->level;
     restore_flags(flags);
     return threshold;
+}
+
+static enum log_sink_kind classify_log_sink(const char *module, const char *text)
+{
+    if (module && module[0])
+    {
+        if (string_has_prefix_ignore_case(module, "net"))
+            return LOG_SINK_NET;
+        if (string_equals_ignore_case(module, "netd"))
+            return LOG_SINK_NET;
+        if (string_has_prefix_ignore_case(module, "ipc"))
+            return LOG_SINK_IPC;
+        if (string_equals_ignore_case(module, "logd"))
+            return LOG_SINK_IPC;
+    }
+
+    if (text && text[0])
+    {
+        if (string_has_prefix_ignore_case(text, "net:"))
+            return LOG_SINK_NET;
+        if (string_has_prefix_ignore_case(text, "ipc:"))
+            return LOG_SINK_IPC;
+    }
+
+    return LOG_SINK_KERNEL;
 }
 
 void klog_set_level(int level)
@@ -338,7 +425,10 @@ void klog_refresh_proc_sink(void)
     struct klog_entry entries[CONFIG_KLOG_CAPACITY];
     size_t count = klog_copy(entries, CONFIG_KLOG_CAPACITY);
 
-    vfs_write_file("/System/log", NULL, 0);
+    ensure_logs_directory();
+
+    for (size_t i = 0; i < LOG_SINK_COUNT; ++i)
+        vfs_write_file(log_sink_paths[i], NULL, 0);
 
     for (size_t i = 0; i < count; ++i)
     {
@@ -357,8 +447,11 @@ void klog_refresh_proc_sink(void)
         append_char(line, &pos, sizeof(line), ' ');
         append_text(line, &pos, sizeof(line), entries[i].text);
         line[pos] = '\0';
-        vfs_append("/System/log", line, pos);
-        vfs_append("/System/log", "\n", 1);
+
+        enum log_sink_kind target = classify_log_sink(entries[i].module, entries[i].text);
+        const char *path = log_sink_paths[(size_t)target];
+        vfs_append(path, line, pos);
+        vfs_append(path, "\n", 1);
     }
 
     proc_sink_guard = 0;

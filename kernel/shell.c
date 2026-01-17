@@ -22,6 +22,7 @@
 #include "arp.h"
 #include "ipv4.h"
 #include "icmp.h"
+#include "pic.h"
 
 #define SHELL_PROMPT "proOS >> "
 #define INPUT_MAX 256
@@ -37,6 +38,32 @@ static char shell_history[SHELL_HISTORY_CAPACITY][INPUT_MAX];
 static size_t shell_history_count = 0;
 static size_t shell_history_next = 0;
 static char shell_cwd[VFS_MAX_PATH] = "/";
+
+static void shell_sleep_ticks(uint32_t ticks)
+{
+    __asm__ __volatile__("sti");
+    process_sleep(ticks);
+}
+
+static void shell_yield(void)
+{
+    __asm__ __volatile__("sti");
+    process_yield();
+}
+
+static void shell_recover_input(void)
+{
+    __asm__ __volatile__("sti");
+    pic_clear_mask(0);
+    pic_clear_mask(1);
+}
+
+static uint32_t shell_read_flags(void)
+{
+    uint32_t flags;
+    __asm__ __volatile__("pushf\n\tpop %0" : "=r"(flags));
+    return flags;
+}
 
 static size_t str_len(const char *s)
 {
@@ -610,13 +637,34 @@ static size_t shell_read_line(char *buffer, size_t max_len)
     size_t len = 0;
     int history_pos = -1;
 
+    /* Force full interrupt recovery before reading input */
+    __asm__ __volatile__("sti" ::: "memory");
+    pic_clear_mask(0);
+    pic_clear_mask(1);
+
     while (1)
     {
         char c = kb_getchar();
         if (!c)
         {
-            __asm__ __volatile__("hlt");
-            continue;
+            if (kb_poll())
+            {
+                c = kb_getchar();
+                if (!c)
+                    continue;
+            }
+            else
+            {
+                uint32_t flags = shell_read_flags();
+                if ((flags & (1u << 9)) == 0)
+                {
+                    shell_recover_input();
+                    continue;
+                }
+
+                __asm__ __volatile__("sti\n\thlt");
+                continue;
+            }
         }
 
         unsigned char uc = (unsigned char)c;
@@ -888,9 +936,9 @@ static int shell_ping_wait_for_arp(struct net_device *dev, const uint8_t target[
             return 1;
 
         if (events == 0)
-            process_sleep(1);
+            shell_sleep_ticks(1);
         else
-            process_yield();
+            shell_yield();
     }
 
     return arp_cache_lookup(dev, target, mac_dummy) ? 1 : 0;
@@ -959,9 +1007,9 @@ static int shell_ping_wait_for_reply(uint16_t identifier, uint16_t sequence, uin
         }
 
         if (events == 0)
-            process_sleep(1);
+            shell_sleep_ticks(1);
         else
-            process_yield();
+            shell_yield();
     }
 
     return 0;
@@ -1105,6 +1153,7 @@ static void command_help(void)
     vga_write_line("  net    - networking utilities");
     vga_write_line("  gfx    - draw compositor demo");
     vga_write_line("  kdlg   - show kernel log");
+    vga_write_line("  logs <name> - view logs (kernel|net|ipc)");
     vga_write_line("  kdlvl [lvl] - adjust log verbosity");
     vga_write_line("  tasks  - list processes");
     vga_write_line("  proc_count - show active process count");
@@ -1267,7 +1316,7 @@ static void command_reboot(void)
     outb(0x64, 0xFE);
 
     for (;;)
-        __asm__ __volatile__("hlt");
+        __asm__ __volatile__("sti\n\thlt");
 }
 
 static void command_ls(const char *args)
@@ -2593,6 +2642,7 @@ static void command_net_ping(const char *args)
     if (!dev)
     {
         vga_write_line("net: no interfaces registered");
+        shell_recover_input();
         return;
     }
 
@@ -2600,6 +2650,7 @@ static void command_net_ping(const char *args)
     if (*token == '\0')
     {
         vga_write_line("Usage: net ping <ipv4> [count]");
+        shell_recover_input();
         return;
     }
 
@@ -2614,6 +2665,7 @@ static void command_net_ping(const char *args)
     if (token[idx] != '\0' && token[idx] != ' ')
     {
         vga_write_line("net: address too long");
+        shell_recover_input();
         return;
     }
 
@@ -2642,18 +2694,21 @@ static void command_net_ping(const char *args)
         if (*after)
         {
             vga_write_line("Usage: net ping <ipv4> [count]");
+            shell_recover_input();
             return;
         }
 
         if (!parse_positive_int(count_text, &count) || count <= 0)
         {
             vga_write_line("net: invalid count");
+            shell_recover_input();
             return;
         }
 
         if (count > SHELL_PING_MAX_COUNT)
         {
             vga_write_line("net: count too large");
+            shell_recover_input();
             return;
         }
     }
@@ -2662,6 +2717,7 @@ static void command_net_ping(const char *args)
     if (!parse_ipv4_address(ip_text, target))
     {
         vga_write_line("net: invalid IPv4 address");
+        shell_recover_input();
         return;
     }
 
@@ -2762,9 +2818,9 @@ static void command_net_ping(const char *args)
                     break;
                 }
                 if (events == 0)
-                    process_sleep(1);
+                    shell_sleep_ticks(1);
                 else
-                    process_yield();
+                    shell_yield();
             }
             if (abort_ping)
                 break;
@@ -2827,6 +2883,8 @@ static void command_net_ping(const char *args)
         vga_write(max_buf);
         vga_write_line(" ms");
     }
+
+    shell_recover_input();
 }
 
 static void command_net_ip(const char *args)
@@ -3093,6 +3151,96 @@ static void command_gfx(void)
         vga_write_line("Graphics demo failed.");
 }
 
+static const char *logs_resolve_path(const char *name)
+{
+    if (shell_str_equals(name, "kernel"))
+        return "/System/Logs/kernel.log";
+    if (shell_str_equals(name, "net"))
+        return "/System/Logs/net.log";
+    if (shell_str_equals(name, "ipc"))
+        return "/System/Logs/ipc.log";
+    return NULL;
+}
+
+static void command_logs(const char *args)
+{
+    const char *trimmed = skip_spaces(args ? args : "");
+    if (*trimmed == '\0')
+    {
+        vga_write_line("Usage: logs <kernel|net|ipc>");
+        return;
+    }
+
+    char name[16];
+    size_t idx = 0;
+    while (trimmed[idx] && trimmed[idx] != ' ' && idx + 1 < sizeof(name))
+    {
+        name[idx] = trimmed[idx];
+        ++idx;
+    }
+
+    if (trimmed[idx] != '\0' && trimmed[idx] != ' ')
+    {
+        vga_write_line("logs: name too long");
+        return;
+    }
+
+    name[idx] = '\0';
+
+    const char *rest = skip_spaces(trimmed + idx);
+    if (*rest != '\0')
+    {
+        vga_write_line("Usage: logs <kernel|net|ipc>");
+        return;
+    }
+
+    const char *path = logs_resolve_path(name);
+    if (!path)
+    {
+        vga_write("logs: unknown log '");
+        vga_write(name);
+        vga_write_line("'");
+        return;
+    }
+
+    klog_enable_proc_sink();
+    klog_refresh_proc_sink();
+
+    char buffer[VFS_INLINE_CAP];
+    int length = vfs_read_path(path, buffer, sizeof(buffer));
+    if (length < 0)
+    {
+        if (vfs_write_file(path, "", 0) == 0)
+            length = vfs_read_path(path, buffer, sizeof(buffer));
+        if (length < 0)
+        {
+            vga_write("logs: unable to read ");
+            vga_write_line(name);
+            return;
+        }
+    }
+
+    size_t max_output = sizeof(buffer) - 1u;
+    if ((size_t)length > max_output)
+        length = (int)max_output;
+    buffer[length] = '\0';
+
+    if (length == 0)
+    {
+        vga_write(name);
+        vga_write_line(" log empty.");
+        return;
+    }
+
+    vga_write("logs[");
+    vga_write(name);
+    vga_write_line("]:");
+    vga_write_line(buffer);
+
+    if ((size_t)length == max_output)
+        vga_write_line("logs: output truncated (buffer limit)");
+}
+
 /* Simple kernel worker that spins and yields to exercise the scheduler. */
 static void stress_worker(void)
 {
@@ -3100,7 +3248,7 @@ static void stress_worker(void)
     {
         for (volatile int i = 0; i < CONFIG_STRESS_SPIN_CYCLES; ++i)
             __asm__ __volatile__("nop");
-        process_yield();
+        shell_yield();
     }
 }
 
@@ -3543,6 +3691,10 @@ static void shell_execute(char *line)
     {
         command_kdlg();
     }
+    else if (shell_str_equals(cursor, "logs") || shell_str_starts_with(cursor, "logs "))
+    {
+        command_logs(cursor + 4);
+    }
     else if (shell_str_equals(cursor, "kdlvl") || shell_str_starts_with(cursor, "kdlvl "))
     {
         command_kdlvl(cursor + 5);
@@ -3587,6 +3739,9 @@ void shell_run(void)
 
     while (1)
     {
+        __asm__ __volatile__("sti");
+        pic_clear_mask(0);
+        pic_clear_mask(1);
         shell_render_prompt();
         size_t len = shell_read_line(buffer, sizeof(buffer));
         if (len > 0)
