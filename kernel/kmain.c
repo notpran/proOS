@@ -17,6 +17,7 @@
 #include "ipc.h"
 #include "pit.h"
 #include "debug.h"
+#include "sync.h"
 #include "blockdev.h"
 #include "partition.h"
 #include "volmgr.h"
@@ -298,6 +299,8 @@ void kmain(void)
     klog_info("kernel: volume manager ready");
     process_system_init();
     klog_info("kernel: process system initialized");
+    sync_init();
+    klog_info("kernel: sync primitives ready");
     syscall_init();
     klog_info("kernel: syscall layer ready");
 

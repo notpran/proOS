@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "ipc.h"
 #include "service.h"
+#include "sync.h"
 
 #include "config.h"
 
@@ -368,6 +369,64 @@ static int32_t sys_exit_handler(struct syscall_envelope *msg)
     return 0;
 }
 
+static int32_t sys_sched_set_handler(struct syscall_envelope *msg)
+{
+    if (msg->argc < 4)
+        return -1;
+
+    int pid = (int)msg->args[0];
+    uint8_t policy = (uint8_t)msg->args[1];
+    uint32_t weight = msg->args[2];
+    uint64_t deadline = (uint64_t)msg->args[3];
+    return process_set_scheduler(pid, policy, weight, deadline);
+}
+
+static int32_t sys_mutex_create_handler(struct syscall_envelope *msg)
+{
+    (void)msg;
+    return sync_mutex_create();
+}
+
+static int32_t sys_mutex_lock_handler(struct syscall_envelope *msg)
+{
+    if (msg->argc < 1)
+        return -1;
+    int id = (int)msg->args[0];
+    return sync_mutex_lock(id);
+}
+
+static int32_t sys_mutex_unlock_handler(struct syscall_envelope *msg)
+{
+    if (msg->argc < 1)
+        return -1;
+    int id = (int)msg->args[0];
+    return sync_mutex_unlock(id);
+}
+
+static int32_t sys_sem_create_handler(struct syscall_envelope *msg)
+{
+    if (msg->argc < 1)
+        return -1;
+    int initial = (int)msg->args[0];
+    return sync_semaphore_create(initial);
+}
+
+static int32_t sys_sem_wait_handler(struct syscall_envelope *msg)
+{
+    if (msg->argc < 1)
+        return -1;
+    int id = (int)msg->args[0];
+    return sync_semaphore_wait(id);
+}
+
+static int32_t sys_sem_post_handler(struct syscall_envelope *msg)
+{
+    if (msg->argc < 1)
+        return -1;
+    int id = (int)msg->args[0];
+    return sync_semaphore_post(id);
+}
+
 static int32_t syscall_invoke(struct syscall_envelope *msg)
 {
     if (msg->number >= SYSCALL_TABLE_SIZE)
@@ -437,6 +496,13 @@ void syscall_init(void)
     syscall_register_handler(SYS_IPC_RECV, sys_ipc_recv_handler, "sys_ipc_recv");
     syscall_register_handler(SYS_IPC_SHARE, sys_ipc_share_handler, "sys_ipc_share");
     syscall_register_handler(SYS_SERVICE_CONNECT, sys_service_connect_handler, "sys_service_connect");
+    syscall_register_handler(SYS_SCHED_SET, sys_sched_set_handler, "sys_sched_set");
+    syscall_register_handler(SYS_MUTEX_CREATE, sys_mutex_create_handler, "sys_mutex_create");
+    syscall_register_handler(SYS_MUTEX_LOCK, sys_mutex_lock_handler, "sys_mutex_lock");
+    syscall_register_handler(SYS_MUTEX_UNLOCK, sys_mutex_unlock_handler, "sys_mutex_unlock");
+    syscall_register_handler(SYS_SEM_CREATE, sys_sem_create_handler, "sys_sem_create");
+    syscall_register_handler(SYS_SEM_WAIT, sys_sem_wait_handler, "sys_sem_wait");
+    syscall_register_handler(SYS_SEM_POST, sys_sem_post_handler, "sys_sem_post");
 }
 
 void syscall_handler(struct regs *frame)
