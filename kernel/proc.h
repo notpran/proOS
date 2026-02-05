@@ -121,7 +121,7 @@ struct process_info
     uint32_t sched_weight;
     uint64_t sched_deadline;
   /*removed duplicate variables*/ 
-    uint64_t sched_deadline;
+  
     uint64_t vruntime;
     uint32_t time_slice_remaining;
     uint32_t time_slice_ticks;
