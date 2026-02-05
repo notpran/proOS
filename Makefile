@@ -63,6 +63,7 @@ KERNEL_OBJS := $(BUILD_DIR)/crt0.o \
 		   $(BUILD_DIR)/ramfs.o \
 		   $(BUILD_DIR)/devmgr.o \
 		   $(BUILD_DIR)/spinlock.o \
+		   $(BUILD_DIR)/sync.o \
 		   $(BUILD_DIR)/pci.o \
 		   $(BUILD_DIR)/e1000.o \
 		   $(BUILD_DIR)/net.o \

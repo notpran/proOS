@@ -1,0 +1,12 @@
+# Doxygen configuration (minimal)
+PROJECT_NAME           = "proOS"
+OUTPUT_DIRECTORY       = docs/doxygen
+INPUT                  = kernel modules boot
+RECURSIVE              = YES
+FILE_PATTERNS          = *.c *.h *.s *.S
+EXCLUDE_PATTERNS       = */build/* */iso/*
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
+EXTRACT_ALL            = YES

@@ -7,6 +7,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define USER_SCHED_POLICY_FAIR 0u
+#define USER_SCHED_POLICY_DEADLINE 1u
+
 static inline int32_t sys_call(uint32_t number, uint32_t argc, uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3)
 {
     struct syscall_envelope request;
@@ -39,6 +42,11 @@ static inline int sys_spawn(void (*entry)(void), size_t stack_size)
     return (int)sys_call(SYS_SPAWN, 2, (uint32_t)(uintptr_t)entry, (uint32_t)stack_size, 0, 0);
 }
 
+static inline int sys_thread_create(void (*entry)(void), size_t stack_size)
+{
+    return sys_spawn(entry, stack_size);
+}
+
 static inline int sys_sleep(uint32_t ticks)
 {
     return (int)sys_call(SYS_SLEEP, 1, ticks, 0, 0, 0);
@@ -62,6 +70,42 @@ static inline int sys_ipc_share(pid_t target, void *addr, size_t pages)
 static inline int sys_service_connect(enum system_service service, uint32_t rights)
 {
     return (int)sys_call(SYS_SERVICE_CONNECT, 2, (uint32_t)service, rights, 0, 0);
+}
+
+static inline int sys_sched_set(int pid, uint8_t policy, uint32_t weight, uint64_t deadline_ticks)
+{
+    uint32_t deadline_low = (uint32_t)(deadline_ticks & 0xFFFFFFFFu);
+    return (int)sys_call(SYS_SCHED_SET, 4, (uint32_t)pid, (uint32_t)policy, weight, deadline_low);
+}
+
+static inline int sys_mutex_create(void)
+{
+    return (int)sys_call(SYS_MUTEX_CREATE, 0, 0, 0, 0, 0);
+}
+
+static inline int sys_mutex_lock(int id)
+{
+    return (int)sys_call(SYS_MUTEX_LOCK, 1, (uint32_t)id, 0, 0, 0);
+}
+
+static inline int sys_mutex_unlock(int id)
+{
+    return (int)sys_call(SYS_MUTEX_UNLOCK, 1, (uint32_t)id, 0, 0, 0);
+}
+
+static inline int sys_sem_create(int initial_count)
+{
+    return (int)sys_call(SYS_SEM_CREATE, 1, (uint32_t)initial_count, 0, 0, 0);
+}
+
+static inline int sys_sem_wait(int id)
+{
+    return (int)sys_call(SYS_SEM_WAIT, 1, (uint32_t)id, 0, 0, 0);
+}
+
+static inline int sys_sem_post(int id)
+{
+    return (int)sys_call(SYS_SEM_POST, 1, (uint32_t)id, 0, 0, 0);
 }
 
 static inline int sys_chan_create(const char *name, size_t name_len, uint32_t flags)

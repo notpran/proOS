@@ -22,6 +22,13 @@ enum syscall_number
     SYS_IPC_RECV = 13,
     SYS_IPC_SHARE = 14,
     SYS_SERVICE_CONNECT = 15,
+    SYS_SCHED_SET = 16,
+    SYS_MUTEX_CREATE = 17,
+    SYS_MUTEX_LOCK = 18,
+    SYS_MUTEX_UNLOCK = 19,
+    SYS_SEM_CREATE = 20,
+    SYS_SEM_WAIT = 21,
+    SYS_SEM_POST = 22,
     SYS_DYNAMIC_BASE = 32
 };
 

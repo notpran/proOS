@@ -26,6 +26,15 @@ typedef enum
     THREAD_KIND_USER = 1
 } thread_kind_t;
 
+/**
+ * @brief Scheduling policy selection for a process.
+ */
+typedef enum
+{
+    SCHED_POLICY_FAIR = 0,
+    SCHED_POLICY_DEADLINE = 1
+} sched_policy_t;
+
 typedef void (*process_entry_t)(void);
 
 struct context
@@ -79,6 +88,14 @@ struct process
     thread_kind_t kind;
     uint8_t base_priority;
     uint8_t dynamic_priority;
+    /** Scheduler policy (fair or deadline). */
+    uint8_t sched_policy;
+    /** Fair-share weight (higher gets more CPU). */
+    uint32_t sched_weight;
+    /** Absolute deadline tick (0 = none). */
+    uint64_t sched_deadline;
+    /** Virtual runtime used by fair-share selection. */
+    uint64_t vruntime;
     uint8_t on_run_queue;
     uint32_t time_slice_ticks;
     uint32_t time_slice_remaining;
@@ -100,6 +117,14 @@ struct process_info
     thread_kind_t kind;
     uint8_t base_priority;
     uint8_t dynamic_priority;
+    uint8_t sched_policy;
+    uint32_t sched_weight;
+    uint64_t sched_deadline;
+    uint64_t vruntime;
+    uint8_t sched_policy;
+    uint32_t sched_weight;
+    uint64_t sched_deadline;
+    uint64_t vruntime;
     uint32_t time_slice_remaining;
     uint32_t time_slice_ticks;
     uint64_t wake_deadline;
@@ -122,6 +147,16 @@ void process_debug_list(void);
 int process_count(void);
 size_t process_snapshot(struct process_info *out, size_t max_entries);
 void process_scheduler_tick(void);
+/**
+ * @brief Configure scheduling policy for a process.
+ *
+ * @param pid Target PID (<= 0 uses current process).
+ * @param policy SCHED_POLICY_FAIR or SCHED_POLICY_DEADLINE.
+ * @param weight Fair-share weight (0 uses default).
+ * @param deadline_ticks Absolute deadline tick (0 clears).
+ * @return 0 on success, -1 on error.
+ */
+int process_set_scheduler(int pid, uint8_t policy, uint32_t weight, uint64_t deadline_ticks);
 
 /* IPC helpers exposed to syscall layer */
 /* Legacy IPC entry points removed in favour of channel system */

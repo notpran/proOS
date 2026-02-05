@@ -67,17 +67,22 @@ static void thread_entry_trampoline(void) __attribute__((used));
 static int acquire_pid(void);
 static uint8_t scheduler_clamp_priority(int value);
 static uint32_t scheduler_timeslice_for(uint8_t priority);
-static void scheduler_reset_priority(struct process *proc);
-static void scheduler_demote_priority(struct process *proc);
-static void scheduler_boost_priority(struct process *proc);
-static void scheduler_arm_timeslice(struct process *proc);
-static void scheduler_enqueue_ready(struct process *proc);
+static void scheduler_reset_priority(struct process *proc_exec);
+static void scheduler_demote_priority(struct process *proc_exec);
+static void scheduler_boost_priority(struct process *proc_exec);
+static void scheduler_arm_timeslice(struct process *proc_exec);
+static void scheduler_enqueue_ready(struct process *proc_exec);
 static struct process *scheduler_dequeue_next(void);
-static void scheduler_insert_sleep(struct process *proc);
-static void scheduler_remove_from_sleep(struct process *proc);
+static void scheduler_remove_from_ready(struct process *proc_exec);
+static struct process *scheduler_pick_deadline(void);
+static struct process *scheduler_pick_fair(void);
+static struct process *scheduler_select_next(void);
+static void scheduler_account_runtime(struct process *proc_exec);
+static void scheduler_insert_sleep(struct process *proc_exec);
+static void scheduler_remove_from_sleep(struct process *proc_exec);
 static void wake_sleepers(uint64_t now);
 static void scheduler_preempt_running(int demote_priority);
-static void reclaim_zombie(struct process *proc);
+static void reclaim_zombie(struct process *proc_exec);
 static struct process *scheduler_create_thread(process_entry_t entry, size_t stack_size, thread_kind_t kind, uint8_t base_priority, int emit_event, int is_idle);
 static void idle_thread(void);
 static uint8_t scheduler_default_user_priority(void);
@@ -174,6 +179,10 @@ static struct process *alloc_process_slot(void)
 			processes[i].stack_size = PROC_STACK_SIZE;
 			processes[i].wait_channel = -1;
 			processes[i].ipc_waiting = 0;
+			processes[i].sched_policy = SCHED_POLICY_FAIR;
+			processes[i].sched_weight = CONFIG_SCHED_DEFAULT_WEIGHT;
+			processes[i].sched_deadline = 0;
+			processes[i].vruntime = 0;
 			for (size_t slot = 0; slot < CONFIG_PROCESS_CHANNEL_SLOTS; ++slot)
 				processes[i].channel_slots[slot] = -1;
 			ipc_attach_process(&processes[i]);
@@ -218,27 +227,27 @@ static uint32_t scheduler_timeslice_for(uint8_t priority)
 	return slice;
 }
 
-static void scheduler_reset_priority(struct process *proc)
+static void scheduler_reset_priority(struct process *proc_exec)
 {
-	if (!proc)
+	if (!proc_exec)
 		return;
-	proc->dynamic_priority = proc->base_priority;
+	proc_exec->dynamic_priority = proc_exec->base_priority;
 }
 
-static void scheduler_demote_priority(struct process *proc)
+static void scheduler_demote_priority(struct process *proc_exec)
 {
-	if (!proc)
+	if (!proc_exec)
 		return;
-	if (proc->dynamic_priority < (uint8_t)SCHED_PRIORITY_MAX)
-		proc->dynamic_priority = (uint8_t)(proc->dynamic_priority + 1u);
+	if (proc_exec->dynamic_priority < (uint8_t)SCHED_PRIORITY_MAX)
+		proc_exec->dynamic_priority = (uint8_t)(proc_exec->dynamic_priority + 1u);
 }
 
-static void scheduler_boost_priority(struct process *proc)
+static void scheduler_boost_priority(struct process *proc_exec)
 {
-	if (!proc)
+	if (!proc_exec)
 		return;
 
-	uint8_t base = proc->base_priority;
+	uint8_t base = proc_exec->base_priority;
 	uint8_t target = base;
 
 #if CONFIG_SCHED_MAX_DYNAMIC_BOOST > 0
@@ -252,41 +261,76 @@ static void scheduler_boost_priority(struct process *proc)
 	}
 #endif
 
-	proc->dynamic_priority = scheduler_clamp_priority(target);
+	proc_exec->dynamic_priority = scheduler_clamp_priority(target);
 }
 
-static void scheduler_arm_timeslice(struct process *proc)
+static void scheduler_arm_timeslice(struct process *proc_exec)
 {
-	if (!proc)
+	if (!proc_exec)
 		return;
-	proc->time_slice_ticks = scheduler_timeslice_for(proc->dynamic_priority);
-	proc->time_slice_remaining = proc->time_slice_ticks;
+	proc_exec->time_slice_ticks = scheduler_timeslice_for(proc_exec->dynamic_priority);
+	proc_exec->time_slice_remaining = proc_exec->time_slice_ticks;
 }
 
-static void scheduler_enqueue_ready(struct process *proc)
+static void scheduler_enqueue_ready(struct process *proc_exec)
 {
-	if (!proc || proc == idle_process)
+	if (!proc_exec || proc_exec == idle_process)
 		return;
-	if (proc->on_run_queue)
+	if (proc_exec->on_run_queue)
 		return;
 
-	uint8_t priority = scheduler_clamp_priority(proc->dynamic_priority);
+	uint8_t priority = scheduler_clamp_priority(proc_exec->dynamic_priority);
 	struct run_queue *queue = &ready_queues[priority];
 
-	proc->next_run = NULL;
+	proc_exec->next_run = NULL;
 	if (!queue->head)
 	{
-		queue->head = proc;
-		queue->tail = proc;
+		queue->head = proc_exec;
+		queue->tail = proc_exec;
 	}
 	else
 	{
-		queue->tail->next_run = proc;
-		queue->tail = proc;
+		queue->tail->next_run = proc_exec;
+		queue->tail = proc_exec;
 	}
 
 	ready_bitmap |= (1u << priority);
-	proc->on_run_queue = 1;
+	proc_exec->on_run_queue = 1;
+}
+
+static void scheduler_remove_from_ready(struct process *proc_exec)
+{
+	if (!proc_exec)
+		return;
+
+	for (int priority = SCHED_PRIORITY_MIN; priority <= SCHED_PRIORITY_MAX; ++priority)
+	{
+		struct run_queue *queue = &ready_queues[priority];
+		struct process *prev = NULL;
+		struct process *iter = queue->head;
+		while (iter)
+		{
+			if (iter == proc_exec)
+			{
+				if (prev)
+					prev->next_run = iter->next_run;
+				else
+					queue->head = iter->next_run;
+
+				if (queue->tail == iter)
+					queue->tail = prev;
+
+				if (!queue->head)
+					ready_bitmap &= ~(1u << priority);
+
+				iter->next_run = NULL;
+				iter->on_run_queue = 0;
+				return;
+			}
+			prev = iter;
+			iter = iter->next_run;
+		}
+	}
 }
 
 static struct process *scheduler_dequeue_next(void)
@@ -297,59 +341,141 @@ static struct process *scheduler_dequeue_next(void)
 			continue;
 
 		struct run_queue *queue = &ready_queues[priority];
-		struct process *proc = queue->head;
-		if (!proc)
+		struct process *proc_exec = queue->head;
+		if (!proc_exec)
 		{
 			ready_bitmap &= ~(1u << priority);
 			queue->tail = NULL;
 			continue;
 		}
 
-		queue->head = proc->next_run;
+		queue->head = proc_exec->next_run;
 		if (!queue->head)
 		{
 			queue->tail = NULL;
 			ready_bitmap &= ~(1u << priority);
 		}
 
-		proc->next_run = NULL;
-		proc->on_run_queue = 0;
-		return proc;
+		proc_exec->next_run = NULL;
+		proc_exec->on_run_queue = 0;
+		return proc_exec;
 	}
 	return NULL;
 }
 
-static void scheduler_insert_sleep(struct process *proc)
+static struct process *scheduler_pick_deadline(void)
 {
-	if (!proc)
+	struct process *best = NULL;
+	uint64_t best_deadline = 0;
+
+	for (int priority = SCHED_PRIORITY_MIN; priority <= SCHED_PRIORITY_MAX; ++priority)
+	{
+		struct run_queue *queue = &ready_queues[priority];
+		for (struct process *iter = queue->head; iter; iter = iter->next_run)
+		{
+			if (iter->sched_policy != SCHED_POLICY_DEADLINE || iter->sched_deadline == 0)
+				continue;
+			if (!best || iter->sched_deadline < best_deadline)
+			{
+				best = iter;
+				best_deadline = iter->sched_deadline;
+			}
+		}
+	}
+
+	if (best)
+		scheduler_remove_from_ready(best);
+	return best;
+}
+
+static struct process *scheduler_pick_fair(void)
+{
+	struct process *best = NULL;
+	uint64_t best_vr = 0;
+
+	for (int priority = SCHED_PRIORITY_MIN; priority <= SCHED_PRIORITY_MAX; ++priority)
+	{
+		struct run_queue *queue = &ready_queues[priority];
+		for (struct process *iter = queue->head; iter; iter = iter->next_run)
+		{
+			if (iter->sched_policy != SCHED_POLICY_FAIR)
+				continue;
+			if (!best || iter->vruntime < best_vr)
+			{
+				best = iter;
+				best_vr = iter->vruntime;
+			}
+		}
+	}
+
+	if (best)
+		scheduler_remove_from_ready(best);
+	return best;
+}
+
+static struct process *scheduler_select_next(void)
+{
+	struct process *proc_exec = scheduler_pick_deadline();
+	if (proc_exec)
+		return proc_exec;
+	proc_exec = scheduler_pick_fair();
+	if (proc_exec)
+		return proc_exec;
+	return scheduler_dequeue_next();
+}
+
+static void scheduler_account_runtime(struct process *proc_exec)
+{
+	if (!proc_exec || proc_exec == idle_process)
+		return;
+	if (proc_exec->sched_policy != SCHED_POLICY_FAIR)
 		return;
 
-	scheduler_remove_from_sleep(proc);
+	uint32_t used = proc_exec->time_slice_ticks;
+	if (proc_exec->time_slice_remaining <= proc_exec->time_slice_ticks)
+		used -= proc_exec->time_slice_remaining;
 
-	if (!sleep_list || proc->wake_deadline < sleep_list->wake_deadline)
+	if (used == 0)
+		return;
+
+	uint32_t weight = proc_exec->sched_weight ? proc_exec->sched_weight : CONFIG_SCHED_DEFAULT_WEIGHT;
+	uint64_t scaled = ((uint64_t)used * (uint64_t)CONFIG_SCHED_BASE_WEIGHT) / (uint64_t)weight;
+	if (scaled == 0)
+		scaled = 1;
+	proc_exec->vruntime += scaled;
+}
+
+static void scheduler_insert_sleep(struct process *proc_exec)
+{
+	if (!proc_exec)
+		return;
+
+	scheduler_remove_from_sleep(proc_exec);
+
+	if (!sleep_list || proc_exec->wake_deadline < sleep_list->wake_deadline)
 	{
-		proc->next_sleep = sleep_list;
-		sleep_list = proc;
+		proc_exec->next_sleep = sleep_list;
+		sleep_list = proc_exec;
 		return;
 	}
 
 	struct process *iter = sleep_list;
-	while (iter->next_sleep && iter->next_sleep->wake_deadline <= proc->wake_deadline)
+	while (iter->next_sleep && iter->next_sleep->wake_deadline <= proc_exec->wake_deadline)
 		iter = iter->next_sleep;
 
-	proc->next_sleep = iter->next_sleep;
-	iter->next_sleep = proc;
+	proc_exec->next_sleep = iter->next_sleep;
+	iter->next_sleep = proc_exec;
 }
 
-static void scheduler_remove_from_sleep(struct process *proc)
+static void scheduler_remove_from_sleep(struct process *proc_exec)
 {
-	if (!proc || !sleep_list)
+	if (!proc_exec || !sleep_list)
 		return;
 
-	if (sleep_list == proc)
+	if (sleep_list == proc_exec)
 	{
-		sleep_list = proc->next_sleep;
-		proc->next_sleep = NULL;
+		sleep_list = proc_exec->next_sleep;
+		proc_exec->next_sleep = NULL;
 		return;
 	}
 
@@ -357,7 +483,7 @@ static void scheduler_remove_from_sleep(struct process *proc)
 	struct process *iter = sleep_list->next_sleep;
 	while (iter)
 	{
-		if (iter == proc)
+		if (iter == proc_exec)
 		{
 			prev->next_sleep = iter->next_sleep;
 			iter->next_sleep = NULL;
@@ -372,67 +498,71 @@ static void wake_sleepers(uint64_t now)
 {
 	while (sleep_list && sleep_list->wake_deadline <= now)
 	{
-		struct process *proc = sleep_list;
-		sleep_list = proc->next_sleep;
-		proc->next_sleep = NULL;
-		proc->wake_deadline = 0;
-		scheduler_boost_priority(proc);
-		proc->state = PROC_READY;
-		scheduler_enqueue_ready(proc);
+		struct process *proc_exec = sleep_list;
+		sleep_list = proc_exec->next_sleep;
+		proc_exec->next_sleep = NULL;
+		proc_exec->wake_deadline = 0;
+		scheduler_boost_priority(proc_exec);
+		proc_exec->state = PROC_READY;
+		scheduler_enqueue_ready(proc_exec);
 	}
 }
 
 static void scheduler_preempt_running(int demote_priority)
 {
-	struct process *proc = current_process;
-	if (!proc)
+	struct process *proc_exec = current_process;
+	if (!proc_exec)
 		return;
 
-	if (proc == idle_process)
+	if (proc_exec == idle_process)
 	{
-		context_switch(&proc->ctx, &scheduler_ctx);
-		proc->state = PROC_RUNNING;
+		context_switch(&proc_exec->ctx, &scheduler_ctx);
+		proc_exec->state = PROC_RUNNING;
 		return;
 	}
 
 	if (demote_priority)
-		scheduler_demote_priority(proc);
+		scheduler_demote_priority(proc_exec);
 
-	proc->state = PROC_READY;
-	scheduler_enqueue_ready(proc);
-	context_switch(&proc->ctx, &scheduler_ctx);
-	proc->state = PROC_RUNNING;
+	proc_exec->state = PROC_READY;
+	scheduler_enqueue_ready(proc_exec);
+	context_switch(&proc_exec->ctx, &scheduler_ctx);
+	proc_exec->state = PROC_RUNNING;
 }
 
-static void reclaim_zombie(struct process *proc)
+static void reclaim_zombie(struct process *proc_exec)
 {
-	if (!proc || proc->state != PROC_ZOMBIE)
+	if (!proc_exec || proc_exec->state != PROC_ZOMBIE)
 		return;
 
-	int pid = proc->pid;
-	int exit_code = proc->exit_code;
+	int pid = proc_exec->pid;
+	int exit_code = proc_exec->exit_code;
 
-	scheduler_remove_from_sleep(proc);
-	proc->on_run_queue = 0;
-	proc->next_run = NULL;
+	scheduler_remove_from_sleep(proc_exec);
+	proc_exec->on_run_queue = 0;
+	proc_exec->next_run = NULL;
 
-	proc->pid = -1;
-	proc->state = PROC_UNUSED;
-	proc->channel_count = 0;
-	proc->wait_channel = -1;
-	proc->ipc_waiting = 0;
-	proc->exit_code = 0;
-	proc->ctx.esp = 0;
-	proc->entry = NULL;
-	proc->time_slice_ticks = 0;
-	proc->time_slice_remaining = 0;
-	proc->wake_deadline = 0;
-	proc->kind = THREAD_KIND_KERNEL;
-	proc->base_priority = scheduler_clamp_priority(SCHED_PRIORITY_MAX);
-	proc->dynamic_priority = proc->base_priority;
+	proc_exec->pid = -1;
+	proc_exec->state = PROC_UNUSED;
+	proc_exec->channel_count = 0;
+	proc_exec->wait_channel = -1;
+	proc_exec->ipc_waiting = 0;
+	proc_exec->exit_code = 0;
+	proc_exec->ctx.esp = 0;
+	proc_exec->entry = NULL;
+	proc_exec->time_slice_ticks = 0;
+	proc_exec->time_slice_remaining = 0;
+	proc_exec->wake_deadline = 0;
+	proc_exec->kind = THREAD_KIND_KERNEL;
+	proc_exec->base_priority = scheduler_clamp_priority(SCHED_PRIORITY_MAX);
+	proc_exec->dynamic_priority = proc_exec->base_priority;
+	proc_exec->sched_policy = SCHED_POLICY_FAIR;
+	proc_exec->sched_weight = CONFIG_SCHED_DEFAULT_WEIGHT;
+	proc_exec->sched_deadline = 0;
+	proc_exec->vruntime = 0;
 	for (size_t slot = 0; slot < CONFIG_PROCESS_CHANNEL_SLOTS; ++slot)
-		proc->channel_slots[slot] = -1;
-	ipc_attach_process(proc);
+		proc_exec->channel_slots[slot] = -1;
+	ipc_attach_process(proc_exec);
 
 	scheduler_send_event(SCHED_EVENT_RECLAIM, pid, exit_code, PROC_UNUSED);
 }
@@ -459,9 +589,9 @@ static uint8_t scheduler_default_kernel_priority(void)
 
 static void thread_entry_trampoline(void)
 {
-	struct process *proc = current_process;
-	if (proc && proc->entry)
-		proc->entry();
+	struct process *proc_exec = current_process;
+	if (proc_exec && proc_exec->entry)
+		proc_exec->entry();
 }
 
 extern void process_exit(int code);
@@ -485,29 +615,33 @@ static struct process *scheduler_create_thread(process_entry_t entry, size_t sta
 	if (stack_size == 0 || stack_size > PROC_STACK_SIZE)
 		stack_size = PROC_STACK_SIZE;
 
-	struct process *proc = alloc_process_slot();
-	if (!proc)
+	struct process *proc_exec = alloc_process_slot();
+	if (!proc_exec)
 		return NULL;
 
-	proc->kind = kind;
-	proc->base_priority = scheduler_clamp_priority(base_priority);
-	proc->dynamic_priority = proc->base_priority;
-	proc->state = PROC_READY;
-	proc->entry = entry;
-	proc->stack_size = stack_size;
-	proc->time_slice_ticks = 0;
-	proc->time_slice_remaining = 0;
-	proc->on_run_queue = 0;
-	proc->wake_deadline = 0;
-	proc->next_run = NULL;
-	proc->next_sleep = NULL;
-	proc->channel_count = 0;
-	proc->wait_channel = -1;
-	proc->exit_code = 0;
+	proc_exec->kind = kind;
+	proc_exec->base_priority = scheduler_clamp_priority(base_priority);
+	proc_exec->dynamic_priority = proc_exec->base_priority;
+	proc_exec->sched_policy = SCHED_POLICY_FAIR;
+	proc_exec->sched_weight = CONFIG_SCHED_DEFAULT_WEIGHT;
+	proc_exec->sched_deadline = 0;
+	proc_exec->vruntime = 0;
+	proc_exec->state = PROC_READY;
+	proc_exec->entry = entry;
+	proc_exec->stack_size = stack_size;
+	proc_exec->time_slice_ticks = 0;
+	proc_exec->time_slice_remaining = 0;
+	proc_exec->on_run_queue = 0;
+	proc_exec->wake_deadline = 0;
+	proc_exec->next_run = NULL;
+	proc_exec->next_sleep = NULL;
+	proc_exec->channel_count = 0;
+	proc_exec->wait_channel = -1;
+	proc_exec->exit_code = 0;
 
-	proc->pid = is_idle ? 0 : acquire_pid();
+	proc_exec->pid = is_idle ? 0 : acquire_pid();
 
-	uint32_t *stack_top = stack_align((uint32_t *)(proc->stack + stack_size));
+	uint32_t *stack_top = stack_align((uint32_t *)(proc_exec->stack + stack_size));
 	uint32_t *sp = stack_top;
 	*--sp = (uint32_t)thread_bootstrap;
 	*--sp = 0u;
@@ -518,26 +652,26 @@ static struct process *scheduler_create_thread(process_entry_t entry, size_t sta
 	*--sp = 0u;
 	*--sp = 0u;
 	*--sp = 0u;
-	proc->ctx.esp = (uint32_t)sp;
+	proc_exec->ctx.esp = (uint32_t)sp;
 
 	if (!is_idle)
 	{
-		scheduler_arm_timeslice(proc);
-		scheduler_enqueue_ready(proc);
+		scheduler_arm_timeslice(proc_exec);
+		scheduler_enqueue_ready(proc_exec);
 	}
 	else
 	{
-		scheduler_arm_timeslice(proc);
-		idle_process = proc;
+		scheduler_arm_timeslice(proc_exec);
+		idle_process = proc_exec;
 	}
 
-	if (emit_event && proc->pid > 0)
+	if (emit_event && proc_exec->pid > 0)
 	{
-		log_process_event("process: created pid ", proc->pid);
-		scheduler_send_event(SCHED_EVENT_CREATE, proc->pid, 0, proc->state);
+		log_process_event("process: created pid ", proc_exec->pid);
+		scheduler_send_event(SCHED_EVENT_CREATE, proc_exec->pid, 0, proc_exec->state);
 	}
 
-	return proc;
+	return proc_exec;
 }
 
 static void idle_thread(void)
@@ -558,6 +692,10 @@ void process_system_init(void)
 		processes[i].ipc_waiting = 0;
 		processes[i].exit_code = 0;
 		processes[i].on_run_queue = 0;
+		processes[i].sched_policy = SCHED_POLICY_FAIR;
+		processes[i].sched_weight = CONFIG_SCHED_DEFAULT_WEIGHT;
+		processes[i].sched_deadline = 0;
+		processes[i].vruntime = 0;
 		processes[i].next_run = NULL;
 		processes[i].next_sleep = NULL;
 		processes[i].wake_deadline = 0;
@@ -602,8 +740,8 @@ struct process *process_lookup(int pid)
 
 int process_create(void (*entry)(void), size_t stack_size)
 {
-	struct process *proc = scheduler_create_thread(entry, stack_size, THREAD_KIND_USER, scheduler_default_user_priority(), 1, 0);
-	int pid = proc ? proc->pid : -1;
+	struct process *proc_exec = scheduler_create_thread(entry, stack_size, THREAD_KIND_USER, scheduler_default_user_priority(), 1, 0);
+	int pid = proc_exec ? proc_exec->pid : -1;
 	if (pid > 0)
 		debug_publish_task_list();
 	return pid;
@@ -611,8 +749,8 @@ int process_create(void (*entry)(void), size_t stack_size)
 
 int process_create_kernel(void (*entry)(void), size_t stack_size)
 {
-	struct process *proc = scheduler_create_thread(entry, stack_size, THREAD_KIND_KERNEL, scheduler_default_kernel_priority(), 1, 0);
-	int pid = proc ? proc->pid : -1;
+	struct process *proc_exec = scheduler_create_thread(entry, stack_size, THREAD_KIND_KERNEL, scheduler_default_kernel_priority(), 1, 0);
+	int pid = proc_exec ? proc_exec->pid : -1;
 	if (pid > 0)
 		debug_publish_task_list();
 	return pid;
@@ -623,80 +761,114 @@ struct process *process_current(void)
 	return current_process;
 }
 
-void process_wake(struct process *proc)
+int process_set_scheduler(int pid, uint8_t policy, uint32_t weight, uint64_t deadline_ticks)
 {
-	if (!proc || proc->state != PROC_WAITING)
+	struct process *proc_exec = NULL;
+	if (pid <= 0)
+		proc_exec = process_current();
+	else
+		proc_exec = process_lookup(pid);
+
+	if (!proc_exec)
+		return -1;
+
+	if (policy != SCHED_POLICY_FAIR && policy != SCHED_POLICY_DEADLINE)
+		return -1;
+
+	if (policy == SCHED_POLICY_FAIR)
+	{
+		uint32_t effective = weight ? weight : CONFIG_SCHED_DEFAULT_WEIGHT;
+		proc_exec->sched_policy = SCHED_POLICY_FAIR;
+		proc_exec->sched_weight = effective;
+		proc_exec->sched_deadline = 0;
+		return 0;
+	}
+
+	uint64_t now = get_ticks();
+	uint64_t deadline = deadline_ticks;
+	if (deadline != 0 && deadline < now)
+		deadline = now + deadline_ticks;
+
+	proc_exec->sched_policy = SCHED_POLICY_DEADLINE;
+	proc_exec->sched_weight = weight ? weight : CONFIG_SCHED_DEFAULT_WEIGHT;
+	proc_exec->sched_deadline = deadline;
+	return 0;
+}
+
+void process_wake(struct process *proc_exec)
+{
+	if (!proc_exec || proc_exec->state != PROC_WAITING)
 		return;
 
-	scheduler_remove_from_sleep(proc);
-	scheduler_boost_priority(proc);
-	proc->state = PROC_READY;
-	scheduler_enqueue_ready(proc);
+	scheduler_remove_from_sleep(proc_exec);
+	scheduler_boost_priority(proc_exec);
+	proc_exec->state = PROC_READY;
+	scheduler_enqueue_ready(proc_exec);
 }
 
 void process_block_current(void)
 {
-	struct process *proc = current_process;
-	if (!proc || proc == idle_process)
+	struct process *proc_exec = current_process;
+	if (!proc_exec || proc_exec == idle_process)
 		return;
 
-	proc->state = PROC_WAITING;
-	proc->time_slice_remaining = 0;
-	context_switch(&proc->ctx, &scheduler_ctx);
-	proc->state = PROC_RUNNING;
+	proc_exec->state = PROC_WAITING;
+	proc_exec->time_slice_remaining = 0;
+	context_switch(&proc_exec->ctx, &scheduler_ctx);
+	proc_exec->state = PROC_RUNNING;
 }
 
 void process_sleep(uint32_t ticks)
 {
-	struct process *proc = current_process;
-	if (!proc || proc == idle_process)
+	struct process *proc_exec = current_process;
+	if (!proc_exec || proc_exec == idle_process)
 		return;
 
 	if (ticks == 0u)
 		ticks = 1u;
 
 	uint64_t now = get_ticks();
-	proc->wake_deadline = now + (uint64_t)ticks;
-	proc->state = PROC_WAITING;
-	proc->time_slice_remaining = 0;
-	scheduler_insert_sleep(proc);
-	context_switch(&proc->ctx, &scheduler_ctx);
-	proc->state = PROC_RUNNING;
+	proc_exec->wake_deadline = now + (uint64_t)ticks;
+	proc_exec->state = PROC_WAITING;
+	proc_exec->time_slice_remaining = 0;
+	scheduler_insert_sleep(proc_exec);
+	context_switch(&proc_exec->ctx, &scheduler_ctx);
+	proc_exec->state = PROC_RUNNING;
 }
 
 void process_yield(void)
 {
-	struct process *proc = current_process;
-	if (!proc || proc == idle_process)
+	struct process *proc_exec = current_process;
+	if (!proc_exec || proc_exec == idle_process)
 		return;
 
-	scheduler_reset_priority(proc);
-	proc->state = PROC_READY;
-	proc->time_slice_remaining = 0;
-	scheduler_enqueue_ready(proc);
-	context_switch(&proc->ctx, &scheduler_ctx);
-	proc->state = PROC_RUNNING;
+	scheduler_reset_priority(proc_exec);
+	proc_exec->state = PROC_READY;
+	proc_exec->time_slice_remaining = 0;
+	scheduler_enqueue_ready(proc_exec);
+	context_switch(&proc_exec->ctx, &scheduler_ctx);
+	proc_exec->state = PROC_RUNNING;
 }
 
 void process_exit(int code)
 {
-	struct process *proc = current_process;
-	if (!proc)
+	struct process *proc_exec = current_process;
+	if (!proc_exec)
 		return;
 
-	ipc_process_cleanup(proc);
- 	service_handle_exit(proc->pid);
+	ipc_process_cleanup(proc_exec);
+ 	service_handle_exit(proc_exec->pid);
 
-	scheduler_remove_from_sleep(proc);
-	proc->on_run_queue = 0;
-	proc->next_run = NULL;
+	scheduler_remove_from_sleep(proc_exec);
+	proc_exec->on_run_queue = 0;
+	proc_exec->next_run = NULL;
 
-	proc->exit_code = code;
-	proc->state = PROC_ZOMBIE;
-	log_process_event("process: exit pid ", proc->pid);
-	scheduler_send_event(SCHED_EVENT_EXIT, proc->pid, code, proc->state);
+	proc_exec->exit_code = code;
+	proc_exec->state = PROC_ZOMBIE;
+	log_process_event("process: exit pid ", proc_exec->pid);
+	scheduler_send_event(SCHED_EVENT_EXIT, proc_exec->pid, code, proc_exec->state);
 	debug_publish_task_list();
-	context_switch(&proc->ctx, &scheduler_ctx);
+	context_switch(&proc_exec->ctx, &scheduler_ctx);
 
 	for (;;)
 		__asm__ __volatile__("hlt");
@@ -713,7 +885,7 @@ void process_schedule(void)
 	{
 		wake_sleepers(get_ticks());
 
-		struct process *next = scheduler_dequeue_next();
+		struct process *next = scheduler_select_next();
 		if (!next)
 			next = idle_process;
 
@@ -724,6 +896,7 @@ void process_schedule(void)
 		context_switch(&scheduler_ctx, &next->ctx);
 
 		struct process *finished = current_process;
+		scheduler_account_runtime(finished);
 		if (finished && finished->state == PROC_ZOMBIE)
 		{
 			int pid = finished->pid;
@@ -759,21 +932,25 @@ size_t process_snapshot(struct process_info *out, size_t max_entries)
 	size_t count = 0;
 	for (int i = 0; i < MAX_PROCS && count < max_entries; ++i)
 	{
-		struct process *proc = &processes[i];
-		if (proc->state == PROC_UNUSED || proc->pid <= 0)
+		struct process *proc_exec = &processes[i];
+		if (proc_exec->state == PROC_UNUSED || proc_exec->pid <= 0)
 			continue;
 
 		struct process_info *slot = &out[count++];
-		slot->pid = proc->pid;
-		slot->state = proc->state;
-		slot->kind = proc->kind;
-		slot->base_priority = proc->base_priority;
-		slot->dynamic_priority = proc->dynamic_priority;
-		slot->time_slice_remaining = proc->time_slice_remaining;
-		slot->time_slice_ticks = proc->time_slice_ticks;
-		slot->wake_deadline = proc->wake_deadline;
-		slot->stack_pointer = proc->ctx.esp;
-		slot->stack_size = proc->stack_size;
+		slot->pid = proc_exec->pid;
+		slot->state = proc_exec->state;
+		slot->kind = proc_exec->kind;
+		slot->base_priority = proc_exec->base_priority;
+		slot->dynamic_priority = proc_exec->dynamic_priority;
+		slot->sched_policy = proc_exec->sched_policy;
+		slot->sched_weight = proc_exec->sched_weight;
+		slot->sched_deadline = proc_exec->sched_deadline;
+		slot->vruntime = proc_exec->vruntime;
+		slot->time_slice_remaining = proc_exec->time_slice_remaining;
+		slot->time_slice_ticks = proc_exec->time_slice_ticks;
+		slot->wake_deadline = proc_exec->wake_deadline;
+		slot->stack_pointer = proc_exec->ctx.esp;
+		slot->stack_size = proc_exec->stack_size;
 	}
 
 	return count;
@@ -831,21 +1008,21 @@ void process_scheduler_tick(void)
 	uint64_t now = get_ticks();
 	wake_sleepers(now);
 
-	struct process *proc = current_process;
-	if (!proc)
+	struct process *proc_exec = current_process;
+	if (!proc_exec)
 		return;
 
-	if (proc == idle_process)
+	if (proc_exec == idle_process)
 	{
 		if (ready_bitmap != 0u)
 			scheduler_preempt_running(0);
 		return;
 	}
 
-	if (proc->time_slice_remaining > 0)
-		--proc->time_slice_remaining;
+	if (proc_exec->time_slice_remaining > 0)
+		--proc_exec->time_slice_remaining;
 
-	if (proc->time_slice_remaining == 0)
+	if (proc_exec->time_slice_remaining == 0)
 		scheduler_preempt_running(1);
 }
 /* New scheduler implementation will be inserted here */
