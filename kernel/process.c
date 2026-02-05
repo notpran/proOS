@@ -424,6 +424,28 @@ static struct process *scheduler_select_next(void)
 	return scheduler_dequeue_next();
 }
 
+/* Implement unsigned 64/32 division without relying on libgcc helpers. */
+static uint64_t scheduler_div_u64_u32(uint64_t value, uint32_t divisor)
+{
+	if (!divisor)
+		return 0;
+
+	uint64_t quotient = 0;
+	uint64_t remainder = 0;
+
+	for (int shift = 63; shift >= 0; --shift)
+	{
+		remainder = (remainder << 1) | ((value >> shift) & 1ULL);
+		if (remainder >= divisor)
+		{
+			remainder -= divisor;
+			quotient |= (1ULL << shift);
+		}
+	}
+
+	return quotient;
+}
+
 static void scheduler_account_runtime(struct process *proc_exec)
 {
 	if (!proc_exec || proc_exec == idle_process)
@@ -439,7 +461,7 @@ static void scheduler_account_runtime(struct process *proc_exec)
 		return;
 
 	uint32_t weight = proc_exec->sched_weight ? proc_exec->sched_weight : CONFIG_SCHED_DEFAULT_WEIGHT;
-	uint64_t scaled = ((uint64_t)used * (uint64_t)CONFIG_SCHED_BASE_WEIGHT) / (uint64_t)weight;
+	uint64_t scaled = scheduler_div_u64_u32((uint64_t)used * (uint64_t)CONFIG_SCHED_BASE_WEIGHT, weight);
 	if (scaled == 0)
 		scaled = 1;
 	proc_exec->vruntime += scaled;
