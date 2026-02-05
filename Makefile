@@ -77,6 +77,7 @@ KERNEL_OBJS := $(BUILD_DIR)/crt0.o \
 		   $(BUILD_DIR)/partition.o \
 		   $(BUILD_DIR)/bios_fallback.o \
 		   $(BUILD_DIR)/bios_thunk.o \
+		   $(BUILD_DIR)/security.o \
 		   $(BUILD_DIR)/user/init.o \
 		   $(BUILD_DIR)/user/echo_service.o \
 		   $(BUILD_DIR)/user/logger.o \
@@ -114,66 +115,52 @@ all: $(DISK_IMG)
 
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
-	echo "[make] Created build directory: $@"
 
 $(STAGE1): boot/mbr.asm | $(BUILD_DIR)
 	$(NASM) -f bin $< -o $@
-	echo "[make] Assembled stage1 bootloader: $@"
 
 $(STAGE2): boot/stage2.asm | $(BUILD_DIR)
 	$(NASM) -f bin -DSTAGE2_SECTORS=$(STAGE2_SECTORS) -DKERNEL_SECTORS=$(KERNEL_SECTORS) -DFAT16_SECTORS=$(FAT16_SECTORS) $< -o $@
-	echo "[make] Assembled stage2 bootloader: $@"
 
 $(BUILD_DIR)/crt0.o: kernel/crt0.s | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
-	echo "[make] Compiled: $< -> $@" 
 
 $(BUILD_DIR)/%.o: kernel/%.s | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) -m32 -c $< -o $@
-	echo "[make] Assembled: $< -> $@"
 
 $(BUILD_DIR)/%.o: kernel/%.S | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) -m32 -c $< -o $@
-	echo "[make] Assembled: $< -> $@"
 
 $(BUILD_DIR)/%.o: kernel/%.c | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
-	echo "[make] Compiled: $< -> $@"
 
 $(BUILD_DIR)/modules:
 	@mkdir -p $(BUILD_DIR)/modules
-	echo "[make] Created modules build directory: $@"
 
 $(BUILD_DIR)/modules/%_module.o: modules/%_module.c | $(BUILD_DIR)/modules
 	$(CC) $(MODULE_CFLAGS) -c $< -o $@
-	echo "[make] Compiled module source: $< -> $@"
 
 $(BUILD_DIR)/modules/%.$(MODULE_EXT): $(BUILD_DIR)/modules/%_module.o
 	$(LD) -r -o $@ $<
-	echo "[make] Linked module object: $< -> $@"
 
 $(BUILD_DIR)/modules/%_blob.o: $(BUILD_DIR)/modules/%.$(MODULE_EXT)
 	$(OBJCOPY) -I binary -O elf32-i386 -B i386 --rename-section .data=.rodata,alloc,load,readonly,data,contents $< $@
-	echo "[make] Created module blob object: $< -> $@"
 
 $(KERNEL_ELF): $(KERNEL_OBJS) kernel/link.ld | $(BUILD_DIR)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o $@
-	echo "[make] Linked kernel ELF: $@"
 
 $(KERNEL_BIN): $(KERNEL_ELF) | $(BUILD_DIR)
 	$(OBJCOPY) -O binary $< $@
-	echo "[make] Created kernel binary: $@"
+
 $(FAT16_IMG_TOOL): kernel/fat16_image.c | $(BUILD_DIR)
 	$(HOST_CC) -DFAT16_IMAGE_STANDALONE -o $@ $<
-	echo "[make] Compiled FAT16 image tool: $@"
 
 $(FAT16_IMG): $(FAT16_IMG_TOOL) $(DISK_MODULE_MODS) | $(BUILD_DIR)
 	$< $@
-	echo "[make] Created FAT16 image: $@"
 
 $(DISK_IMG): $(STAGE1) $(STAGE2) $(KERNEL_BIN) $(FAT16_IMG) | $(BUILD_DIR)
 	rm -f $@
@@ -182,20 +169,15 @@ $(DISK_IMG): $(STAGE1) $(STAGE2) $(KERNEL_BIN) $(FAT16_IMG) | $(BUILD_DIR)
 	dd if=$(STAGE2) of=$@ bs=512 seek=1 conv=notrunc status=none
 	dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_OFFSET) conv=notrunc status=none
 	dd if=$(FAT16_IMG) of=$@ bs=512 seek=$(FAT16_OFFSET) conv=notrunc status=none
-	echo "[make] Created disk image: $@"
-	echo "[make] image built and compiled successfully."
 
 
 $(ISO_IMG): $(DISK_IMG)
 	bash iso/make_iso.sh $(DISK_IMG) $(ISO_IMG)
-	echo "[make] Created ISO image: $@"
 
 iso: $(ISO_IMG)
 
 run-qemu: $(DISK_IMG)
 	qemu-system-i386 -drive format=raw,file=$(DISK_IMG)
-	echo "[make] Running QEMU with disk image: $(DISK_IMG)"
 
 clean:
 	rm -rf $(BUILD_DIR)
-	echo "[make] Cleaned build artifacts."

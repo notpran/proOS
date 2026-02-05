@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "config.h"
+#include "security_types.h"
 #include "spinlock.h"
 #include "ipc_types.h"
 
@@ -108,6 +109,10 @@ struct process
     uint8_t ipc_cap_count;
     struct ipc_share_link ipc_shares[CONFIG_IPC_MAX_SHARED_PER_PROC];
     uint8_t ipc_share_count;
+    uid_t owner_uid;
+    gid_t owner_gid;
+    uint32_t owner_permissions;
+    sid_t session_id;
 };
 
 struct process_info
@@ -128,6 +133,10 @@ struct process_info
     uint64_t wake_deadline;
     uintptr_t stack_pointer;
     size_t stack_size;
+    uid_t owner_uid;
+    gid_t owner_gid;
+    uint32_t owner_permissions;
+    sid_t session_id;
 };
 
 void process_system_init(void);
@@ -145,6 +154,12 @@ void process_debug_list(void);
 int process_count(void);
 size_t process_snapshot(struct process_info *out, size_t max_entries);
 void process_scheduler_tick(void);
+int process_set_session(struct process *proc, sid_t session_id);
+void process_clear_session(struct process *proc);
+sid_t process_session_id(const struct process *proc);
+uid_t process_user_id(const struct process *proc);
+gid_t process_group_id(const struct process *proc);
+uint32_t process_effective_permissions(const struct process *proc);
 /**
  * @brief Configure scheduling policy for a process.
  *

@@ -23,6 +23,7 @@
 #include "ipv4.h"
 #include "icmp.h"
 #include "pic.h"
+#include "security.h"
 
 #define SHELL_PROMPT "proOS >> "
 #define INPUT_MAX 256
@@ -1155,6 +1156,10 @@ static void command_help(void)
     vga_write_line("  kdlg   - show kernel log");
     vga_write_line("  logs <name> - view logs (kernel|net|ipc)");
     vga_write_line("  kdlvl [lvl] - adjust log verbosity");
+    vga_write_line("  users  - list registered users");
+    vga_write_line("  whoami - show current user session");
+    vga_write_line("  login <user> - start user session");
+    vga_write_line("  logout - end current session");
     vga_write_line("  tasks  - list processes");
     vga_write_line("  proc_count - show active process count");
     vga_write_line("  spawn <n> - stress process creation");
@@ -3413,6 +3418,190 @@ static void command_kdlvl(const char *args)
         vga_write_line(name);
     }
 }
+static void command_users(void)
+{
+    user_t entries[CONFIG_SECURITY_MAX_USERS];
+    size_t count = security_user_list(entries, CONFIG_SECURITY_MAX_USERS);
+    if (count == 0)
+    {
+        vga_write_line("users: no accounts available");
+        return;
+    }
+
+    vga_write_line("Registered users:");
+    for (size_t i = 0; i < count; ++i)
+    {
+        char uid_buf[11];
+        char gid_buf[11];
+        char perm_buf[11];
+
+        write_hex32(entries[i].uid, uid_buf);
+        write_hex32(entries[i].gid, gid_buf);
+        write_hex32(entries[i].permissions, perm_buf);
+
+        vga_write("  ");
+        vga_write(entries[i].username[0] ? entries[i].username : "<unnamed>");
+        vga_write(" (uid=");
+        vga_write(uid_buf);
+        vga_write(" gid=");
+        vga_write(gid_buf);
+        vga_write(" perm=");
+        vga_write(perm_buf);
+        vga_write_line(")");
+    }
+}
+
+static void command_whoami(void)
+{
+    struct process *current = process_current();
+    if (!current)
+    {
+        vga_write_line("whoami: no active process");
+        return;
+    }
+
+    sid_t sid = process_session_id(current);
+    if (sid == SECURITY_SID_INVALID)
+    {
+        vga_write_line("whoami: no session");
+        return;
+    }
+
+    struct security_session_info info;
+    if (security_session_info(sid, &info) < 0)
+    {
+        vga_write_line("whoami: session unavailable");
+        return;
+    }
+
+    char uid_buf[32];
+    char gid_buf[32];
+    char perm_buf[11];
+    write_u64((uint64_t)info.uid, uid_buf);
+    write_u64((uint64_t)info.gid, gid_buf);
+    write_hex32(info.permissions, perm_buf);
+
+    vga_write("User: ");
+    if (info.user && info.user->username[0])
+        vga_write(info.user->username);
+    else
+        vga_write("<unknown>");
+    vga_write(" (uid=");
+    vga_write(uid_buf);
+    vga_write(" gid=");
+    vga_write(gid_buf);
+    vga_write(" perm=");
+    vga_write(perm_buf);
+    vga_write_line(")");
+}
+
+static void command_login(const char *args)
+{
+    const char *token = skip_spaces(args ? args : "");
+    if (*token == '\0')
+    {
+        vga_write_line("Usage: login <username>");
+        return;
+    }
+
+    char username[sizeof(((user_t *)0)->username)];
+    size_t idx = 0;
+    while (token[idx] && token[idx] != ' ' && idx + 1 < sizeof(username))
+    {
+        username[idx] = token[idx];
+        ++idx;
+    }
+    if (token[idx] != '\0' && token[idx] != ' ')
+    {
+        vga_write_line("login: username too long");
+        return;
+    }
+    username[idx] = '\0';
+
+    const char *extra = skip_spaces(token + idx);
+    if (*extra)
+    {
+        vga_write_line("Usage: login <username>");
+        return;
+    }
+
+    const user_t *user = security_user_find(username);
+    if (!user)
+    {
+        vga_write_line("login: unknown user");
+        return;
+    }
+
+    struct process *current = process_current();
+    if (!current)
+    {
+        vga_write_line("login: no active process");
+        return;
+    }
+
+    if (process_user_id(current) == user->uid)
+    {
+        vga_write("login: already running as ");
+        vga_write_line(user->username);
+        return;
+    }
+
+    sid_t session = SECURITY_SID_INVALID;
+    if (security_session_create(user->uid, user->permissions, &session) < 0)
+    {
+        vga_write_line("login: unable to create session");
+        return;
+    }
+
+    if (process_set_session(current, session) < 0)
+    {
+        security_session_destroy(session);
+        vga_write_line("login: failed to bind session");
+        return;
+    }
+
+    vga_write("login: active session for ");
+    vga_write_line(user->username);
+}
+
+static void command_logout(const char *args)
+{
+    const char *token = args ? skip_spaces(args) : "";
+    if (token && *token)
+    {
+        vga_write_line("Usage: logout");
+        return;
+    }
+
+    struct process *current = process_current();
+    if (!current)
+    {
+        vga_write_line("logout: no active process");
+        return;
+    }
+
+    sid_t current_sid = process_session_id(current);
+    if (current_sid == SECURITY_SID_KERNEL)
+    {
+        vga_write_line("logout: kernel session cannot logout");
+        return;
+    }
+
+    sid_t root_sid = security_session_root();
+    if (current_sid == root_sid)
+    {
+        vga_write_line("logout: already at root session");
+        return;
+    }
+
+    if (process_set_session(current, root_sid) < 0)
+    {
+        vga_write_line("logout: failed to revert to root");
+        return;
+    }
+
+    vga_write_line("logout: session closed");
+}
 
 static void command_proc_count(void)
 {
@@ -3698,6 +3887,22 @@ static void shell_execute(char *line)
     else if (shell_str_equals(cursor, "kdlvl") || shell_str_starts_with(cursor, "kdlvl "))
     {
         command_kdlvl(cursor + 5);
+    }
+    else if (shell_str_equals(cursor, "users"))
+    {
+        command_users();
+    }
+    else if (shell_str_equals(cursor, "whoami"))
+    {
+        command_whoami();
+    }
+    else if (shell_str_equals(cursor, "login") || shell_str_starts_with(cursor, "login "))
+    {
+        command_login(cursor + 5);
+    }
+    else if (shell_str_equals(cursor, "logout") || shell_str_starts_with(cursor, "logout "))
+    {
+        command_logout(cursor + 6);
     }
     else if (shell_str_equals(cursor, "proc_count"))
     {

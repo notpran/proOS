@@ -21,6 +21,7 @@
 #include "blockdev.h"
 #include "partition.h"
 #include "volmgr.h"
+#include "security.h"
 #include "bios_fallback.h"
 #include "service.h"
 #include "service_types.h"
@@ -297,6 +298,8 @@ void kmain(void)
     klog_info("kernel: module system online");
     volmgr_init();
     klog_info("kernel: volume manager ready");
+    security_system_init();
+    klog_info("kernel: security system ready");
     process_system_init();
     klog_info("kernel: process system initialized");
     sync_init();

@@ -1,4 +1,5 @@
 #include "proc.h"
+#include "security.h"
 #include "ipc.h"
 #include "service.h"
 #include "vga.h"
@@ -87,6 +88,79 @@ static struct process *scheduler_create_thread(process_entry_t entry, size_t sta
 static void idle_thread(void);
 static uint8_t scheduler_default_user_priority(void);
 static uint8_t scheduler_default_kernel_priority(void);
+
+int process_set_session(struct process *proc_exec, sid_t session_id)
+{
+	if (!proc_exec)
+		return -1;
+	if (session_id == SECURITY_SID_INVALID)
+		return -1;
+
+	if (proc_exec->session_id == session_id)
+		return 0;
+
+	struct security_session_info info;
+	if (security_session_info(session_id, &info) < 0)
+		return -1;
+
+	if (security_session_acquire(session_id) < 0)
+		return -1;
+
+	sid_t previous = proc_exec->session_id;
+	proc_exec->session_id = info.sid;
+	proc_exec->owner_uid = info.uid;
+	proc_exec->owner_gid = info.gid;
+	proc_exec->owner_permissions = info.permissions;
+
+	if (previous != SECURITY_SID_INVALID)
+		security_session_release(previous);
+	if (previous != SECURITY_SID_INVALID && previous != SECURITY_SID_KERNEL && previous != security_session_root())
+		security_session_destroy(previous);
+
+	return 0;
+}
+
+void process_clear_session(struct process *proc_exec)
+{
+	if (!proc_exec)
+		return;
+
+	if (proc_exec->session_id != SECURITY_SID_INVALID)
+		security_session_release(proc_exec->session_id);
+
+	proc_exec->session_id = SECURITY_SID_INVALID;
+	proc_exec->owner_uid = SECURITY_UID_KERNEL;
+	proc_exec->owner_gid = SECURITY_GID_KERNEL;
+	proc_exec->owner_permissions = SECURITY_PERMISSION_ALL;
+}
+
+sid_t process_session_id(const struct process *proc_exec)
+{
+	if (!proc_exec)
+		return SECURITY_SID_INVALID;
+	return proc_exec->session_id;
+}
+
+uid_t process_user_id(const struct process *proc_exec)
+{
+	if (!proc_exec)
+		return SECURITY_UID_KERNEL;
+	return proc_exec->owner_uid;
+}
+
+gid_t process_group_id(const struct process *proc_exec)
+{
+	if (!proc_exec)
+		return SECURITY_GID_KERNEL;
+	return proc_exec->owner_gid;
+}
+
+uint32_t process_effective_permissions(const struct process *proc_exec)
+{
+	if (!proc_exec)
+		return SECURITY_PERMISSION_ALL;
+	return proc_exec->owner_permissions;
+}
 
 static void scheduler_send_event(uint8_t action, int pid, int value, proc_state_t state)
 {
@@ -582,6 +656,10 @@ static void reclaim_zombie(struct process *proc_exec)
 	proc_exec->sched_weight = CONFIG_SCHED_DEFAULT_WEIGHT;
 	proc_exec->sched_deadline = 0;
 	proc_exec->vruntime = 0;
+	proc_exec->owner_uid = SECURITY_UID_KERNEL;
+	proc_exec->owner_gid = SECURITY_GID_KERNEL;
+	proc_exec->owner_permissions = SECURITY_PERMISSION_ALL;
+	proc_exec->session_id = SECURITY_SID_INVALID;
 	for (size_t slot = 0; slot < CONFIG_PROCESS_CHANNEL_SLOTS; ++slot)
 		proc_exec->channel_slots[slot] = -1;
 	ipc_attach_process(proc_exec);
@@ -676,6 +754,23 @@ static struct process *scheduler_create_thread(process_entry_t entry, size_t sta
 	*--sp = 0u;
 	proc_exec->ctx.esp = (uint32_t)sp;
 
+	sid_t target_session = security_session_kernel();
+	if (kind == THREAD_KIND_USER)
+	{
+		sid_t inherited = SECURITY_SID_INVALID;
+		if (current_process)
+			inherited = process_session_id(current_process);
+		if (inherited == SECURITY_SID_INVALID)
+			inherited = security_session_root();
+		target_session = inherited;
+	}
+	if (process_set_session(proc_exec, target_session) < 0)
+	{
+		if (target_session != SECURITY_SID_KERNEL && target_session != security_session_root())
+			security_session_destroy(target_session);
+		process_set_session(proc_exec, security_session_kernel());
+	}
+
 	if (!is_idle)
 	{
 		scheduler_arm_timeslice(proc_exec);
@@ -718,6 +813,10 @@ void process_system_init(void)
 		processes[i].sched_weight = CONFIG_SCHED_DEFAULT_WEIGHT;
 		processes[i].sched_deadline = 0;
 		processes[i].vruntime = 0;
+		processes[i].owner_uid = SECURITY_UID_KERNEL;
+		processes[i].owner_gid = SECURITY_GID_KERNEL;
+		processes[i].owner_permissions = SECURITY_PERMISSION_ALL;
+		processes[i].session_id = SECURITY_SID_INVALID;
 		processes[i].next_run = NULL;
 		processes[i].next_sleep = NULL;
 		processes[i].wake_deadline = 0;
@@ -878,6 +977,8 @@ void process_exit(int code)
 	if (!proc_exec)
 		return;
 
+    process_clear_session(proc_exec);
+
 	ipc_process_cleanup(proc_exec);
  	service_handle_exit(proc_exec->pid);
 
@@ -973,6 +1074,10 @@ size_t process_snapshot(struct process_info *out, size_t max_entries)
 		slot->wake_deadline = proc_exec->wake_deadline;
 		slot->stack_pointer = proc_exec->ctx.esp;
 		slot->stack_size = proc_exec->stack_size;
+		slot->owner_uid = proc_exec->owner_uid;
+		slot->owner_gid = proc_exec->owner_gid;
+		slot->owner_permissions = proc_exec->owner_permissions;
+		slot->session_id = proc_exec->session_id;
 	}
 
 	return count;
