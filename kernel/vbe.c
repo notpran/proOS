@@ -78,6 +78,12 @@ static int adopt_font_candidate(const struct parsed_font *candidate, uint8_t *ow
 static void update_console_geometry(void);
 static void console_redraw(void);
 
+static uint32_t *map_framebuffer(uint32_t phys_addr)
+{
+    /* Paging is not enabled yet, so physical addresses are identity-mapped. */
+    return (uint32_t *)(uintptr_t)phys_addr;
+}
+
 static int configure_font_metrics(uint32_t height, uint32_t stride, uint32_t width_hint, uint32_t first_char, uint32_t count, int lsb_left)
 {
     if (height == 0 || stride == 0)
@@ -289,7 +295,8 @@ int vbe_init(void)
         return 0;
     }
 
-    fb_ptr = (uint32_t *)(uintptr_t)bootinfo->fb_ptr;
+    uint32_t fb_phys = bootinfo->fb_phys ? bootinfo->fb_phys : bootinfo->fb_ptr;
+    fb_ptr = map_framebuffer(fb_phys);
     fb_pitch_pixels = bootinfo->fb_pitch / 4;
     fb_w = bootinfo->fb_width;
     fb_h = bootinfo->fb_height;

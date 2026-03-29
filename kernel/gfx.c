@@ -32,6 +32,10 @@ static int z_stack[MAX_WINDOWS];
 static int window_count = 0;
 static int demo_ready = 0;
 
+static uint32_t *gfx_back_buffer = NULL;
+static uint32_t gfx_back_pitch_pixels = 0;
+static uint32_t gfx_back_height = 0;
+
 static const uint8_t *gfx_font_base = &font8x8_basic[0][0];
 static uint32_t gfx_font_stride = 8;
 static uint32_t gfx_font_height = 8;
@@ -45,6 +49,56 @@ static int gfx_font_lsb_left = 1;
 static inline uint32_t rgb(uint8_t r, uint8_t g, uint8_t b)
 {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
+
+static uint32_t *gfx_draw_surface(void)
+{
+    if (gfx_back_buffer)
+        return gfx_back_buffer;
+    return vbe_framebuffer();
+}
+
+static void gfx_surface_put_pixel(uint32_t *surface, uint32_t pitch, uint32_t width, uint32_t height, int x, int y, uint32_t color)
+{
+    if (!surface || pitch == 0)
+        return;
+    if (x < 0 || y < 0)
+        return;
+    if ((uint32_t)x >= width || (uint32_t)y >= height)
+        return;
+    surface[(uint32_t)y * pitch + (uint32_t)x] = color;
+}
+
+static void gfx_surface_fill_rect(uint32_t *surface, uint32_t pitch, uint32_t width, uint32_t height, int x, int y, int w, int h, uint32_t color)
+{
+    if (!surface || pitch == 0 || w <= 0 || h <= 0)
+        return;
+
+    for (int row = 0; row < h; ++row)
+    {
+        int dst_y = y + row;
+        if (dst_y < 0 || (uint32_t)dst_y >= height)
+            continue;
+
+        uint32_t *dst = surface + (uint32_t)dst_y * pitch;
+        for (int col = 0; col < w; ++col)
+        {
+            int dst_x = x + col;
+            if (dst_x < 0 || (uint32_t)dst_x >= width)
+                continue;
+            dst[(uint32_t)dst_x] = color;
+        }
+    }
+}
+
+static void gfx_surface_clear(uint32_t *surface, uint32_t pitch, uint32_t height, uint32_t color)
+{
+    if (!surface || pitch == 0 || height == 0)
+        return;
+
+    size_t total = (size_t)pitch * (size_t)height;
+    for (size_t i = 0; i < total; ++i)
+        surface[i] = color;
 }
 
 static void gfx_refresh_font(void)
@@ -225,10 +279,13 @@ static void window_draw_to_fb(const struct window *w)
     if (!w || !w->pixels || !vbe_available())
         return;
 
-    uint32_t *fb = vbe_framebuffer();
+    uint32_t *fb = gfx_draw_surface();
     uint32_t pitch = vbe_pitch() / 4;
     uint32_t screen_w = vbe_width();
     uint32_t screen_h = vbe_height();
+
+    if (!fb || pitch == 0)
+        return;
 
     for (int row = 0; row < w->h; ++row)
     {
@@ -281,7 +338,7 @@ static void compositor_draw(void)
     if (!vbe_available())
         return;
 
-    vbe_fill_rect(0, 0, (int)vbe_width(), (int)vbe_height(), rgb(24, 32, 48));
+    gfx_fill_rect(0, 0, (int)vbe_width(), (int)vbe_height(), rgb(24, 32, 48));
 
     for (int i = 0; i < window_count; ++i)
     {
@@ -293,6 +350,79 @@ static void compositor_draw(void)
 static void window_write_paragraph(struct window *w, int x, int y, const char *text)
 {
     window_draw_text(w, x, y, text, WINDOW_TEXT_COLOR, WINDOW_BG_COLOR);
+}
+
+void gfx_init(void)
+{
+    if (!vbe_available() || gfx_back_buffer)
+        return;
+
+    uint32_t pitch_pixels = vbe_pitch() / 4;
+    uint32_t width = vbe_width();
+    uint32_t height = vbe_height();
+    if (pitch_pixels == 0 || width == 0 || height == 0)
+        return;
+
+    size_t total_pixels = (size_t)pitch_pixels * (size_t)height;
+    if (total_pixels == 0)
+        return;
+
+    uint32_t *buffer = (uint32_t *)kalloc_zero(total_pixels * sizeof(uint32_t));
+    if (!buffer)
+        return;
+
+    gfx_back_buffer = buffer;
+    gfx_back_pitch_pixels = pitch_pixels;
+    gfx_back_height = height;
+}
+
+void gfx_put_pixel(int x, int y, uint32_t color)
+{
+    if (!vbe_available())
+        return;
+
+    uint32_t *surface = gfx_draw_surface();
+    uint32_t pitch = vbe_pitch() / 4;
+    uint32_t width = vbe_width();
+    uint32_t height = vbe_height();
+    gfx_surface_put_pixel(surface, pitch, width, height, x, y, color);
+}
+
+void gfx_fill_rect(int x, int y, int w, int h, uint32_t color)
+{
+    if (!vbe_available())
+        return;
+
+    uint32_t *surface = gfx_draw_surface();
+    uint32_t pitch = vbe_pitch() / 4;
+    uint32_t width = vbe_width();
+    uint32_t height = vbe_height();
+    gfx_surface_fill_rect(surface, pitch, width, height, x, y, w, h, color);
+}
+
+void gfx_clear(uint32_t color)
+{
+    if (!vbe_available())
+        return;
+
+    uint32_t *surface = gfx_draw_surface();
+    uint32_t pitch = vbe_pitch() / 4;
+    uint32_t height = vbe_height();
+    gfx_surface_clear(surface, pitch, height, color);
+}
+
+void gfx_swap_buffers(void)
+{
+    if (!vbe_available() || !gfx_back_buffer)
+        return;
+
+    uint32_t *front = vbe_framebuffer();
+    if (!front || gfx_back_pitch_pixels == 0 || gfx_back_height == 0)
+        return;
+
+    size_t total = (size_t)gfx_back_pitch_pixels * (size_t)gfx_back_height;
+    for (size_t i = 0; i < total; ++i)
+        front[i] = gfx_back_buffer[i];
 }
 
 int gfx_available(void)
@@ -341,6 +471,8 @@ static void ensure_demo_initialized(void)
 
 int gfx_show_demo(void)
 {
+    gfx_init();
+
     if (!vbe_available())
         return -1;
 
@@ -350,5 +482,6 @@ int gfx_show_demo(void)
         return -1;
 
     compositor_draw();
+    gfx_swap_buffers();
     return 0;
 }
