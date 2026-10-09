@@ -314,6 +314,7 @@ void kmain(void)
     service_register(SYSTEM_SERVICE_NETD, "netd", user_netd, svc_rights);
     service_register(SYSTEM_SERVICE_INPUTD, "inputd", user_inputd, svc_rights);
     service_register(SYSTEM_SERVICE_LOGD, "logd", user_logd, svc_rights);
+    service_register(SYSTEM_SERVICE_GUI, "gui", user_gui, svc_rights);
     service_bootstrap();
     klog_info("kernel: services launched");
     if (process_create(user_init, PROC_STACK_SIZE) < 0)
@@ -325,10 +326,6 @@ void kmain(void)
     {
         klog_info("kernel: init process spawned");
     }
-    if (process_create(user_gui, PROC_STACK_SIZE) < 0)
-        klog_error("kernel: failed to create GUI process");
-    else
-        klog_info("kernel: GUI process spawned");
     if (process_create_kernel(shell_task, PROC_STACK_SIZE) < 0)
         klog_error("kernel: failed to create shell thread");
     else

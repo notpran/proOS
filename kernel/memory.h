@@ -7,6 +7,7 @@
 void memory_init(void);
 void *kalloc(size_t size);
 void *kalloc_zero(size_t size);
+void kfree(void *ptr);
 
 size_t memory_total_bytes(void);
 size_t memory_used_bytes(void);

@@ -23,6 +23,8 @@ typedef struct
     uint32_t buttons;
 } gui_input_event_t;
 
+#define GUI_INPUT_IPC_TYPE 0x47554901u
+
 #define GUI_KEY_ARROW_UP 0x80u
 #define GUI_KEY_ARROW_DOWN 0x81u
 #define GUI_KEY_ARROW_LEFT 0x82u

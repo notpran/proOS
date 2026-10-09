@@ -3238,13 +3238,19 @@ static void command_gui(const char *args)
         return;
     }
 
+    if (shell_str_equals(command, "smoke"))
+    {
+        vga_write_line(gui_desktop_smoke_status() ? "GUI smoke check: ready." : "GUI smoke check: not ready.");
+        return;
+    }
+
     if (shell_str_equals(command, "redraw"))
     {
         vga_write_line(gui_desktop_show() == 0 ? "GUI redrawn." : "GUI redraw failed.");
         return;
     }
 
-    vga_write_line("Usage: gui [info|windows|processes|fps|redraw]");
+    vga_write_line("Usage: gui [info|windows|processes|fps|smoke|redraw]");
 }
 
 static const char *logs_resolve_path(const char *name)

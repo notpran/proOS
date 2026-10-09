@@ -8,6 +8,14 @@
 static uint8_t *heap_ptr = HEAP_START_ADDR;
 static uint8_t *const heap_end = HEAP_START_ADDR + HEAP_SIZE_BYTES;
 
+struct free_block
+{
+    size_t size;
+    struct free_block *next;
+};
+
+static struct free_block *free_list;
+
 static size_t align_up(size_t value, size_t alignment)
 {
     size_t mask = alignment - 1;
@@ -17,18 +25,34 @@ static size_t align_up(size_t value, size_t alignment)
 void memory_init(void)
 {
     heap_ptr = HEAP_START_ADDR;
+    free_list = NULL;
 }
 
 void *kalloc(size_t size)
 {
+    struct free_block **link;
+    struct free_block *block;
     if (size == 0)
         return NULL;
 
     size = align_up(size, 16);
+    link = &free_list;
+    while (*link)
+    {
+        if ((*link)->size >= size)
+        {
+            block = *link;
+            *link = block->next;
+            return (uint8_t *)block + sizeof(*block);
+        }
+        link = &(*link)->next;
+    }
+    size += sizeof(struct free_block);
     if (heap_ptr + size > heap_end)
         return NULL;
 
-    void *result = heap_ptr;
+    void *result = heap_ptr + sizeof(struct free_block);
+    ((struct free_block *)heap_ptr)->size = size - sizeof(struct free_block);
     heap_ptr += size;
     return result;
 }
@@ -43,6 +67,18 @@ void *kalloc_zero(size_t size)
         ptr[i] = 0;
 
     return ptr;
+}
+
+void kfree(void *ptr)
+{
+    struct free_block *block;
+    if (!ptr)
+        return;
+    if ((uint8_t *)ptr < HEAP_START_ADDR + sizeof(struct free_block) || (uint8_t *)ptr >= heap_ptr)
+        return;
+    block = (struct free_block *)((uint8_t *)ptr - sizeof(*block));
+    block->next = free_list;
+    free_list = block;
 }
 
 size_t memory_total_bytes(void)

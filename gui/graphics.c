@@ -177,5 +177,8 @@ gfx_surface_t *gfx_surface_create(uint32_t width, uint32_t height)
 void gfx_surface_destroy(gfx_surface_t *surface)
 {
     if (surface)
-        surface->pixels = NULL;
+    {
+        kfree(surface->pixels);
+        kfree(surface);
+    }
 }
