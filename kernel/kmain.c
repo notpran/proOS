@@ -53,9 +53,9 @@ static void print_banner(void)
     vga_set_color(0xF, 0x0);
     vga_write_line("proOS (Protected Mode)");
     vga_set_color(0xA, 0x0);
-    vga_write_line("version: v0.8 b2");
+    vga_write_line("version: v0.10 b1");
     vga_set_color(0x7, 0x0);
-    vga_write_line("Type 'help' to list commands.");
+    vga_write_line("Type 'help' to list commands!");
     vga_write_char('\n');
 }
 

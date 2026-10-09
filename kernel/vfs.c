@@ -588,8 +588,11 @@ static void vfs_prepare_virtual_fs(void)
     if (devicefs_mount() < 0)
         klog_warn("vfs: devicefs mount failed");
 
-    const char *version = "proOS kernel/0.5\n";
+    const char *version = "proOS kernel/0.10b1\n";
     vfs_write_file("/System/version", version, local_strlen(version));
+
+    const char *helloP = "Heya! ik this is broken but hey it works! also good morning varshi!!";
+    vfs_write_file("/System/hello:P.txt", helloP, local_strlen(helloP));
 
     const char *null_stub = "";
     vfs_write_file("/Devices/Null", null_stub, local_strlen(null_stub));
