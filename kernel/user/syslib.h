@@ -9,6 +9,25 @@
 
 #define USER_SCHED_POLICY_FAIR 0u
 #define USER_SCHED_POLICY_DEADLINE 1u
+#define SYS_KBD_POLL (SYS_DYNAMIC_BASE + 0u)
+#define SYS_MOUSE_POLL (SYS_DYNAMIC_BASE + 1u)
+
+struct user_keyboard_event
+{
+    uint32_t timestamp;
+    uint32_t payload;
+    uint8_t ch;
+    uint8_t reserved[3];
+};
+
+struct user_mouse_event
+{
+    uint32_t timestamp;
+    int32_t dx;
+    int32_t dy;
+    int32_t wheel;
+    uint32_t buttons;
+};
 
 static inline int32_t sys_call(uint32_t number, uint32_t argc, uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3)
 {
@@ -50,6 +69,16 @@ static inline int sys_thread_create(void (*entry)(void), size_t stack_size)
 static inline int sys_sleep(uint32_t ticks)
 {
     return (int)sys_call(SYS_SLEEP, 1, ticks, 0, 0, 0);
+}
+
+static inline int sys_keyboard_poll(struct user_keyboard_event *event)
+{
+    return (int)sys_call(SYS_KBD_POLL, 1, (uint32_t)(uintptr_t)event, 0, 0, 0);
+}
+
+static inline int sys_mouse_poll(struct user_mouse_event *event)
+{
+    return (int)sys_call(SYS_MOUSE_POLL, 1, (uint32_t)(uintptr_t)event, 0, 0, 0);
 }
 
 static inline int sys_ipc_send(pid_t target, const void *buffer, size_t size)

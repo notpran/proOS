@@ -7,6 +7,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../gui/desktop.h"
+
+#if 0
 #define MAX_WINDOWS 4
 #define TITLE_BAR_PADDING 2
 #define BORDER_COLOR 0x00222222
@@ -351,4 +354,15 @@ int gfx_show_demo(void)
 
     compositor_draw();
     return 0;
+}
+#endif
+
+int gfx_available(void)
+{
+    return vbe_available();
+}
+
+int gfx_show_demo(void)
+{
+    return gui_desktop_show();
 }

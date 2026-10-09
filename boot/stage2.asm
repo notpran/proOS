@@ -22,7 +22,9 @@ ORG 0x7E00
 %define KERNEL_TEMP_SEG     0x1000            ; 0x1000 << 4 = 0x00010000
 %define KERNEL_TEMP_ADDR    0x00010000
 %define KERNEL_BASE_ADDR    0x00100000
-%define PM_STACK_TOP        0x00180000
+; Keep the early protected-mode stack above the kernel image/.bss.
+; The kernel is currently larger than the old 0x00180000 stack location.
+%define PM_STACK_TOP        0x002C0000
 
 %define FAT16_TEMP_SEG      0x9000
 %define FAT16_TEMP_ADDR     0x00090000
@@ -73,7 +75,6 @@ start_stage2:
 
     call get_bios_font
     call try_vbe_modes
-    mov byte [vbe_available], 0
     cmp byte [vbe_available], 0
     jne .skip_text_mode
     mov ax, 0x0003
@@ -117,9 +118,11 @@ read_sectors:
     jz .done
 
     mov ecx, ebx
-    cmp ecx, 63
+    ; Keep transfers conservative for BIOS EDD implementations. Some BIOSes
+    ; report success but return corrupted data on larger multi-track reads.
+    cmp ecx, 32
     jbe .chunk_ready
-    mov ecx, 63
+    mov ecx, 32
 
 .chunk_ready:
     mov word [dap_sector_count], cx
@@ -140,8 +143,18 @@ read_sectors:
 
     mov si, dap_packet
     mov dl, [boot_drive]
+    ; BIOS INT 13h is allowed to clobber general registers. Preserve the
+    ; transfer state while retaining CF for the error check below.
+    push eax
+    push ebx
+    push ecx
+    push edi
     mov ah, 0x42
     int 0x13
+    pop edi
+    pop ecx
+    pop ebx
+    pop eax
     jc .error
 
     sub ebx, ecx

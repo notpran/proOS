@@ -24,6 +24,10 @@
 #include "icmp.h"
 #include "pic.h"
 #include "security.h"
+#include "../gui/desktop.h"
+#include "../gui/graphics.h"
+#include "../gui/compositor.h"
+#include "../gui/window.h"
 
 #define SHELL_PROMPT "proOS >> "
 #define INPUT_MAX 256
@@ -1153,6 +1157,7 @@ static void command_help(void)
     vga_write_line("  mod    - module control (list/load/unload .kmd)");
     vga_write_line("  net    - networking utilities");
     vga_write_line("  gfx    - draw compositor demo");
+    vga_write_line("  gui    - inspect GUI state or redraw");
     vga_write_line("  kdlg   - show kernel log");
     vga_write_line("  logs <name> - view logs (kernel|net|ipc)");
     vga_write_line("  kdlvl [lvl] - adjust log verbosity");
@@ -3156,6 +3161,92 @@ static void command_gfx(void)
         vga_write_line("Graphics demo failed.");
 }
 
+static void command_gui(const char *args)
+{
+    const char *command = skip_spaces(args ? args : "");
+    const framebuffer_t *framebuffer = gfx_framebuffer();
+    int cursor_x = 0;
+    int cursor_y = 0;
+
+    if (*command == '\0' || shell_str_equals(command, "info"))
+    {
+        if (!framebuffer)
+        {
+            vga_write_line("GUI framebuffer unavailable.");
+            return;
+        }
+        char value[24];
+        vga_write("GUI framebuffer: ");
+        write_u64(framebuffer->width, value);
+        vga_write(value);
+        vga_write("x");
+        write_u64(framebuffer->height, value);
+        vga_write(value);
+        vga_write(" pitch=");
+        write_u64(framebuffer->pitch, value);
+        vga_write(value);
+        vga_write(" bpp=");
+        write_u64(framebuffer->bpp, value);
+        vga_write_line(value);
+        gui_compositor_get_cursor(&cursor_x, &cursor_y);
+        vga_write("GUI cursor: ");
+        write_u64((uint64_t)cursor_x, value);
+        vga_write(value);
+        vga_write(",");
+        write_u64((uint64_t)cursor_y, value);
+        vga_write_line(value);
+        return;
+    }
+
+    if (shell_str_equals(command, "windows"))
+    {
+        gui_window_t *windows[GUI_MAX_WINDOWS];
+        size_t count = gui_window_snapshot(windows, GUI_MAX_WINDOWS);
+        char value[24];
+        for (size_t i = 0; i < count; ++i)
+        {
+            vga_write("window id=");
+            write_u64(windows[i]->id, value);
+            vga_write(value);
+            vga_write(" owner=");
+            write_u64((uint64_t)windows[i]->owner_pid, value);
+            vga_write(value);
+            vga_write(" ");
+            vga_write(windows[i]->visible ? "visible" : "hidden");
+            vga_write_line(windows[i]->focused ? " focused" : "");
+        }
+        if (count == 0)
+            vga_write_line("No GUI windows.");
+        return;
+    }
+
+    if (shell_str_equals(command, "processes"))
+    {
+        command_proc_list();
+        return;
+    }
+
+    if (shell_str_equals(command, "fps"))
+    {
+        char value[24];
+        vga_write("GUI FPS: ");
+        write_u64(gui_compositor_fps(), value);
+        vga_write(value);
+        vga_write(" frames=");
+        write_u64(gui_compositor_frame_count(), value);
+        vga_write_line(value);
+        return;
+    }
+
+    if (shell_str_equals(command, "redraw"))
+    {
+        vga_write_line(gui_desktop_show() == 0 ? "GUI redrawn." : "GUI redraw failed.");
+        return;
+    }
+
+    vga_write_line("Usage: gui [info|windows|processes|fps|redraw]");
+}
+
 static const char *logs_resolve_path(const char *name)
 {
     if (shell_str_equals(name, "kernel"))
@@ -3875,6 +3966,10 @@ static void shell_execute(char *line)
     else if (shell_str_equals(cursor, "gfx"))
     {
         command_gfx();
+    }
+    else if (shell_str_equals(cursor, "gui") || shell_str_starts_with(cursor, "gui "))
+    {
+        command_gui(cursor + 3);
     }
     else if (shell_str_equals(cursor, "kdlg"))
     {

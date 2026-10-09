@@ -51,6 +51,7 @@ uint32_t *vbe_framebuffer(void);
 uint32_t vbe_pitch(void);
 uint32_t vbe_width(void);
 uint32_t vbe_height(void);
+uint32_t vbe_pack_color(uint32_t color);
 void vbe_clear(uint32_t color);
 void vbe_draw_pixel(int x, int y, uint32_t color);
 void vbe_fill_rect(int x, int y, int w, int h, uint32_t color);

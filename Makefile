@@ -1,13 +1,18 @@
 BUILD_DIR := build
 NASM := nasm
-CC := i686-elf-gcc
+CROSS_PREFIX := /c/i386-elf-binutils/
+TARGET := i686-elf
+CC := $(CROSS_PREFIX)clang.exe
+AS := $(CROSS_PREFIX)i686-elf-as.exe
 LD := i686-elf-ld
 OBJCOPY := i686-elf-objcopy
-HOST_CC := gcc
+HOST_CC := clang
 
-CFLAGS := -ffreestanding -fno-stack-protector -fno-builtin -Wall -Wextra -Werror -std=gnu99 -m32 -I kernel
-MODULE_CFLAGS := -ffreestanding -fno-stack-protector -fno-builtin -Wall -Wextra -Werror -std=gnu99 -m32 -I kernel -DMODULE_BUILD
-LDFLAGS := -nostdlib -m elf_i386 -T kernel/link.ld
+CFLAGS := --target=$(TARGET) -B$(CROSS_PREFIX) -ffreestanding -fno-stack-protector -fno-builtin -mno-sse -mno-sse2 -msoft-float -Wall -Iinclude -Wextra -std=gnu99 -m32 -I kernel -I gui
+ASM_CPP_FLAGS := --target=$(TARGET) -m32 -x assembler-with-cpp -Iinclude -I kernel -I gui
+ASFLAGS := --32
+MODULE_CFLAGS := $(CFLAGS) -DMODULE_BUILD
+LDFLAGS := -nostdlib -Iinclude -m elf_i386 -T kernel/link.ld
 
 .DEFAULT_GOAL := all
 
@@ -21,9 +26,9 @@ FAT16_IMG_TOOL := $(BUILD_DIR)/fat16_image.exe
 FAT16_IMG := $(BUILD_DIR)/fat16.img
 FAT16_SECTORS := 128
 STAGE2_SECTORS := 4
-# Reserve enough space for the kernel binary (current size ~132 KiB).
-# Keep headroom so future growth does not truncate the image loading.
-KERNEL_SECTORS := 384
+# Reserve enough space for the kernel binary (currently ~245 KiB).
+# Keep headroom so stage2 never truncates the loaded kernel.
+KERNEL_SECTORS := 640
 KERNEL_OFFSET := 5
 FAT16_OFFSET := $(shell expr $(KERNEL_OFFSET) + $(KERNEL_SECTORS))
 
@@ -84,10 +89,19 @@ KERNEL_OBJS := $(BUILD_DIR)/crt0.o \
 		   $(BUILD_DIR)/user/fsd.o \
 		   $(BUILD_DIR)/user/netd.o \
 		   $(BUILD_DIR)/user/inputd.o \
+		   $(BUILD_DIR)/user/gui.o \
 		   $(BUILD_DIR)/string.o \
 		   $(BUILD_DIR)/module.o \
 		   $(BUILD_DIR)/module_symbols.o
 
+GUI_OBJS := $(BUILD_DIR)/gui/graphics.o \
+		    $(BUILD_DIR)/gui/window.o \
+		    $(BUILD_DIR)/gui/compositor.o \
+		    $(BUILD_DIR)/gui/desktop.o
+
+KERNEL_OBJS += $(GUI_OBJS)
+
+export PATH := /c/i386-elf-binutils:$(PATH)
 MODULE_EXT := kmd
 MODULES := fs ps2kbd ps2mouse pit rtc biosdisk ata time
 MODULE_OBJS := $(addprefix $(BUILD_DIR)/modules/, $(addsuffix _module.o, $(MODULES)))
@@ -119,22 +133,28 @@ $(BUILD_DIR):
 $(STAGE1): boot/mbr.asm | $(BUILD_DIR)
 	$(NASM) -f bin $< -o $@
 
-$(STAGE2): boot/stage2.asm | $(BUILD_DIR)
+$(STAGE2): boot/stage2.asm Makefile | $(BUILD_DIR)
 	$(NASM) -f bin -DSTAGE2_SECTORS=$(STAGE2_SECTORS) -DKERNEL_SECTORS=$(KERNEL_SECTORS) -DFAT16_SECTORS=$(FAT16_SECTORS) $< -o $@
 
 $(BUILD_DIR)/crt0.o: kernel/crt0.s | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD_DIR)/%.o: kernel/%.s | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(CC) -m32 -c $< -o $@
+	$(AS) $(ASFLAGS) $< -o $@
 
 $(BUILD_DIR)/%.o: kernel/%.S | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(CC) -m32 -c $< -o $@
+	$(CC) $(ASM_CPP_FLAGS) -E -P $< -o $@.s
+	$(AS) $(ASFLAGS) $@.s -o $@
+	rm -f $@.s
 
 $(BUILD_DIR)/%.o: kernel/%.c | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/gui/%.o: gui/%.c | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -157,7 +177,7 @@ $(KERNEL_BIN): $(KERNEL_ELF) | $(BUILD_DIR)
 	$(OBJCOPY) -O binary $< $@
 
 $(FAT16_IMG_TOOL): kernel/fat16_image.c | $(BUILD_DIR)
-	$(HOST_CC) -DFAT16_IMAGE_STANDALONE -o $@ $<
+	$(HOST_CC) -DFAT16_IMAGE_STANDALONE -I /ucrt64/include/c++/v1/ -o $@ $<
 
 $(FAT16_IMG): $(FAT16_IMG_TOOL) $(DISK_MODULE_MODS) | $(BUILD_DIR)
 	$< $@

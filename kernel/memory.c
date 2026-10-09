@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 #define HEAP_START_ADDR ((uint8_t *)0x00300000)
-#define HEAP_SIZE_BYTES (0x00100000)
+#define HEAP_SIZE_BYTES (0x01000000)
 
 static uint8_t *heap_ptr = HEAP_START_ADDR;
 static uint8_t *const heap_end = HEAP_START_ADDR + HEAP_SIZE_BYTES;

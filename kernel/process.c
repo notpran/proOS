@@ -6,6 +6,8 @@
 #include "klog.h"
 #include "pit.h"
 #include "debug.h"
+#include "../gui/window.h"
+
 
 #include <stddef.h>
 #include <stdint.h>
@@ -978,6 +980,7 @@ void process_exit(int code)
 		return;
 
     process_clear_session(proc_exec);
+	gui_window_destroy_owner(proc_exec->pid);
 
 	ipc_process_cleanup(proc_exec);
  	service_handle_exit(proc_exec->pid);

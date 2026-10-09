@@ -44,6 +44,12 @@ static uint32_t fb_pitch_pixels = 0;
 static uint32_t fb_w = 0;
 static uint32_t fb_h = 0;
 static int vbe_ready = 0;
+static uint8_t fb_red_mask;
+static uint8_t fb_red_position;
+static uint8_t fb_green_mask;
+static uint8_t fb_green_position;
+static uint8_t fb_blue_mask;
+static uint8_t fb_blue_position;
 
 static const uint8_t *font_base = &font8x8_basic[0][0];
 static uint32_t font_stride = 8;
@@ -212,7 +218,7 @@ static void draw_glyph(int px, int py, char c, uint32_t fg, uint32_t bg)
             uint8_t row_byte = row_ptr[x / 8];
             uint8_t mask = font_lsb_left ? (uint8_t)(1u << (x & 7)) : (uint8_t)(0x80u >> (x & 7));
             uint32_t color = (row_byte & mask) ? fg : bg;
-            dst_row[dst_x] = color;
+            dst_row[dst_x] = vbe_pack_color(color);
         }
     }
 }
@@ -293,6 +299,12 @@ int vbe_init(void)
     fb_pitch_pixels = bootinfo->fb_pitch / 4;
     fb_w = bootinfo->fb_width;
     fb_h = bootinfo->fb_height;
+    fb_red_mask = (uint8_t)(bootinfo->reserved0 & 0xFFu);
+    fb_red_position = (uint8_t)((bootinfo->reserved0 >> 8) & 0xFFu);
+    fb_green_mask = (uint8_t)(bootinfo->reserved1 & 0xFFu);
+    fb_green_position = (uint8_t)((bootinfo->reserved1 >> 8) & 0xFFu);
+    fb_blue_mask = (uint8_t)(bootinfo->reserved2 & 0xFFu);
+    fb_blue_position = (uint8_t)((bootinfo->reserved2 >> 8) & 0xFFu);
     if (!fb_ptr || bootinfo->fb_pitch == 0 || fb_pitch_pixels == 0 || fb_w == 0 || fb_h == 0)
     {
         fb_ptr = NULL;
@@ -359,6 +371,32 @@ uint32_t vbe_height(void)
     return fb_h;
 }
 
+static uint32_t pack_channel(uint32_t channel, uint8_t mask, uint8_t position)
+{
+    if (mask == 0)
+        return 0;
+    return ((channel * ((1u << mask) - 1u) + 127u) / 255u) << position;
+}
+
+uint32_t vbe_pack_color(uint32_t color)
+{
+    if (fb_red_mask == 0 || fb_green_mask == 0 || fb_blue_mask == 0)
+        return color;
+    if (fb_red_mask == 8 && fb_green_mask == 8 && fb_blue_mask == 8 &&
+        fb_green_position == 8)
+    {
+        if (fb_red_position == 16 && fb_blue_position == 0)
+            return color;
+        if (fb_red_position == 0 && fb_blue_position == 16)
+            return ((color & 0x0000FFu) << 16) |
+                   (color & 0x0000FF00u) |
+                   ((color & 0x00FF0000u) >> 16);
+    }
+    return pack_channel((color >> 16) & 0xFFu, fb_red_mask, fb_red_position) |
+           pack_channel((color >> 8) & 0xFFu, fb_green_mask, fb_green_position) |
+           pack_channel(color & 0xFFu, fb_blue_mask, fb_blue_position);
+}
+
 void vbe_clear(uint32_t color)
 {
     if (!vbe_ready)
@@ -366,7 +404,7 @@ void vbe_clear(uint32_t color)
 
     uint32_t total = fb_pitch_pixels * fb_h;
     for (uint32_t i = 0; i < total; ++i)
-        fb_ptr[i] = color;
+        fb_ptr[i] = vbe_pack_color(color);
 }
 
 void vbe_draw_pixel(int x, int y, uint32_t color)
@@ -378,7 +416,7 @@ void vbe_draw_pixel(int x, int y, uint32_t color)
     if ((uint32_t)x >= fb_w || (uint32_t)y >= fb_h)
         return;
 
-    fb_ptr[y * fb_pitch_pixels + x] = color;
+    fb_ptr[y * fb_pitch_pixels + x] = vbe_pack_color(color);
 }
 
 void vbe_fill_rect(int x, int y, int w, int h, uint32_t color)
@@ -397,7 +435,7 @@ void vbe_fill_rect(int x, int y, int w, int h, uint32_t color)
             int dst_x = x + col;
             if (dst_x < 0 || (uint32_t)dst_x >= fb_w)
                 continue;
-            dst[dst_x] = color;
+            dst[dst_x] = vbe_pack_color(color);
         }
     }
 }

@@ -27,6 +27,7 @@
 #include "service_types.h"
 #include "net.h"
 #include "e1000.h"
+#include "../gui/desktop.h"
 
 extern void shell_run(void);
 extern void user_init(void);
@@ -34,6 +35,7 @@ extern void user_fsd(void);
 extern void user_netd(void);
 extern void user_inputd(void);
 extern void user_logd(void);
+extern void user_gui(void);
 
 #define EXTRA_FAT_DISKS 2
 
@@ -323,6 +325,10 @@ void kmain(void)
     {
         klog_info("kernel: init process spawned");
     }
+    if (process_create(user_gui, PROC_STACK_SIZE) < 0)
+        klog_error("kernel: failed to create GUI process");
+    else
+        klog_info("kernel: GUI process spawned");
     if (process_create_kernel(shell_task, PROC_STACK_SIZE) < 0)
         klog_error("kernel: failed to create shell thread");
     else
