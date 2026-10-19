@@ -7,8 +7,11 @@ static void gui_process_input(void)
 {
     gui_input_event_t input;
     uint8_t buffer[sizeof(gui_input_event_t)];
-    while (sys_ipc_recv(IPC_ANY_PROCESS, buffer, sizeof(buffer)) > 0)
+    int received;
+    while ((received = sys_ipc_recv(IPC_ANY_PROCESS, buffer, sizeof(buffer))) > 0)
     {
+        if ((size_t)received != sizeof(input))
+            continue;
         for (size_t i = 0; i < sizeof(input); ++i)
             ((uint8_t *)&input)[i] = buffer[i];
         gui_desktop_run_input_event(&input);

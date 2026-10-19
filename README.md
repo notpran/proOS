@@ -21,10 +21,10 @@ proOS is a BIOS/MBR 32-bit hobby operating system made by me!
 Use MSYS2/WSL2 or another Unix-like environment on Windows. Install:
 
 - `nasm`
-- `i686-elf` cross toolchain (`i686-elf-gcc`, `i686-elf-ld`, `i686-elf-objcopy`)
+- `i686-elf` cross toolchain (`i686-elf-ld`, `i686-elf-objcopy`)
 - `xorriso` (for ISO creation)
 - `qemu-system-i386` (optional, for quick testing)
-- `gcc` (host compiler used to build the FAT16 image helper)
+- `clang` (host compiler used to build the FAT16 image helper)
 
 Ensure the cross toolchain binaries are on your `PATH`.
 

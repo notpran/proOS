@@ -20,6 +20,20 @@ static gui_window_t *resize_window;
 static int resize_width;
 static int resize_height;
 
+static int clamp_coordinate(int64_t value)
+{
+    if (value < (int64_t)-2147483648LL)
+        return (int)-2147483648LL;
+    if (value > (int64_t)2147483647LL)
+        return (int)2147483647LL;
+    return (int)value;
+}
+
+static int add_coordinate(int value, int delta)
+{
+    return clamp_coordinate((int64_t)value + delta);
+}
+
 static uint32_t divide_u32(uint32_t dividend, uint32_t divisor)
 {
     uint32_t quotient = 0;
@@ -105,10 +119,13 @@ void gui_compositor_render(void)
         if (!selected)
             break;
         rendered[selected_index] = 1;
-        gfx_fill_rect(backbuffer, selected->x - 1, selected->y - 20, (int)selected->width + 2, 20, TITLE_COLOR);
-        gfx_fill_rect(backbuffer, selected->x + (int)selected->width - 16, selected->y - 16, 12, 12, 0x00DC2626u);
+        gfx_fill_rect(backbuffer, add_coordinate(selected->x, -1), add_coordinate(selected->y, -20),
+                     (int)selected->width + 2, 20, TITLE_COLOR);
+        gfx_fill_rect(backbuffer, add_coordinate(selected->x, (int)selected->width - 16),
+                     add_coordinate(selected->y, -16), 12, 12, 0x00DC2626u);
         gfx_blit(backbuffer, selected->surface, selected->x, selected->y);
-        gfx_draw_rect(backbuffer, selected->x - 1, selected->y - 20, (int)selected->width + 2, (int)selected->height + 21, WINDOW_BORDER);
+        gfx_draw_rect(backbuffer, add_coordinate(selected->x, -1), add_coordinate(selected->y, -20),
+                      (int)selected->width + 2, (int)selected->height + 21, WINDOW_BORDER);
     }
     gfx_fill_rect(backbuffer, cursor_x, cursor_y, 2, 14, CURSOR_COLOR);
     gfx_fill_rect(backbuffer, cursor_x, cursor_y, 10, 2, CURSOR_COLOR);
@@ -136,13 +153,15 @@ void gui_compositor_dispatch(const gui_event_t *event)
     size_t count = gui_window_snapshot(windows, GUI_MAX_WINDOWS);
     if (event && event->type == GUI_EVENT_MOUSE_MOVE)
     {
-        gui_compositor_set_cursor(cursor_x + event->x, cursor_y + event->y);
+        gui_compositor_set_cursor(add_coordinate(cursor_x, event->x),
+                                  add_coordinate(cursor_y, event->y));
         if (drag_window && (event->buttons & 1u))
-            gui_window_move(drag_window, drag_window->x + event->x, drag_window->y + event->y);
+            gui_window_move(drag_window, add_coordinate(drag_window->x, event->x),
+                            add_coordinate(drag_window->y, event->y));
         if (resize_window && (event->buttons & 1u))
         {
-            resize_width += event->x;
-            resize_height += event->y;
+            resize_width = add_coordinate(resize_width, event->x);
+            resize_height = add_coordinate(resize_height, event->y);
         }
     }
     if (event && event->type == GUI_EVENT_MOUSE_BUTTON_DOWN && event->code == 1u)
@@ -153,9 +172,11 @@ void gui_compositor_dispatch(const gui_event_t *event)
             gui_window_t *candidate = windows[i];
             if (!candidate->visible || candidate->minimized)
                 continue;
-            if (cursor_x < candidate->x - 1 || cursor_x > candidate->x + (int)candidate->width + 1)
+            if ((int64_t)cursor_x < (int64_t)candidate->x - 1 ||
+                (int64_t)cursor_x > (int64_t)candidate->x + candidate->width + 1)
                 continue;
-            if (cursor_y < candidate->y - 20 || cursor_y > candidate->y + (int)candidate->height)
+            if ((int64_t)cursor_y < (int64_t)candidate->y - 20 ||
+                (int64_t)cursor_y > (int64_t)candidate->y + candidate->height)
                 continue;
             if (!hit || candidate->z_order > hit->z_order)
                 hit = candidate;
@@ -165,7 +186,8 @@ void gui_compositor_dispatch(const gui_event_t *event)
         if (hit)
         {
             gui_window_focus(hit);
-            if (cursor_y < hit->y && cursor_x >= hit->x + (int)hit->width - 20)
+            if (cursor_y < hit->y &&
+                (int64_t)cursor_x >= (int64_t)hit->x + hit->width - 20)
             {
                 gui_event_t close_event = { GUI_EVENT_CLOSE, 0, 0, 0, 0 };
                 gui_window_dispatch(hit, &close_event);
@@ -173,7 +195,8 @@ void gui_compositor_dispatch(const gui_event_t *event)
             }
             if (cursor_y < hit->y)
                 drag_window = hit;
-            else if (cursor_x >= hit->x + (int)hit->width - 18 && cursor_y >= hit->y + (int)hit->height - 18)
+            else if ((int64_t)cursor_x >= (int64_t)hit->x + hit->width - 18 &&
+                     (int64_t)cursor_y >= (int64_t)hit->y + hit->height - 18)
             {
                 resize_window = hit;
                 resize_width = (int)hit->width;

@@ -16,7 +16,7 @@ void gui_window_system_init(void)
 
 gui_window_t *gui_window_create(pid_t owner_pid, int x, int y, uint32_t width, uint32_t height, gui_event_handler_t handler)
 {
-    if (width == 0 || height == 0)
+    if (width == 0 || height == 0 || width > 0x3FFFFFFFu || height > 0x3FFFFFFFu)
         return NULL;
     for (size_t i = 0; i < GUI_MAX_WINDOWS; ++i)
     {
@@ -77,7 +77,7 @@ void gui_window_move(gui_window_t *window, int x, int y)
 
 void gui_window_resize(gui_window_t *window, uint32_t width, uint32_t height)
 {
-    if (!window || window->id == 0)
+    if (!window || window->id == 0 || width > 0x3FFFFFFFu || height > 0x3FFFFFFFu)
         return;
     if (width < window->min_width)
         width = window->min_width;

@@ -51,6 +51,50 @@ static uint8_t fb_green_position;
 static uint8_t fb_blue_mask;
 static uint8_t fb_blue_position;
 
+static int color_mask_valid(uint8_t mask, uint8_t position)
+{
+    return mask != 0 && mask <= 8 && position < 32 && mask <= 32 - position;
+}
+
+static int framebuffer_format_valid(void)
+{
+    return color_mask_valid(fb_red_mask, fb_red_position) &&
+           color_mask_valid(fb_green_mask, fb_green_position) &&
+           color_mask_valid(fb_blue_mask, fb_blue_position);
+}
+
+static int clip_framebuffer_rect(int *x, int *y, int *width, int *height)
+{
+    int64_t left;
+    int64_t top;
+    int64_t right;
+    int64_t bottom;
+
+    if (!x || !y || !width || !height || *width <= 0 || *height <= 0)
+        return 0;
+
+    left = *x;
+    top = *y;
+    right = left + *width;
+    bottom = top + *height;
+    if (right <= 0 || bottom <= 0 || left >= (int64_t)fb_w || top >= (int64_t)fb_h)
+        return 0;
+    if (left < 0)
+        left = 0;
+    if (top < 0)
+        top = 0;
+    if (right > (int64_t)fb_w)
+        right = fb_w;
+    if (bottom > (int64_t)fb_h)
+        bottom = fb_h;
+
+    *x = (int)left;
+    *y = (int)top;
+    *width = (int)(right - left);
+    *height = (int)(bottom - top);
+    return *width > 0 && *height > 0;
+}
+
 static const uint8_t *font_base = &font8x8_basic[0][0];
 static uint32_t font_stride = 8;
 static uint32_t font_height_px = 8;
@@ -284,6 +328,7 @@ static void console_newline(void)
 
 int vbe_init(void)
 {
+    size_t framebuffer_bytes;
     font_external_blob = NULL;
     font_base = &font8x8_basic[0][0];
     if (!configure_font_metrics(8, 8, DEFAULT_FONT_WIDTH, 32, 96, 1))
@@ -305,7 +350,21 @@ int vbe_init(void)
     fb_green_position = (uint8_t)((bootinfo->reserved1 >> 8) & 0xFFu);
     fb_blue_mask = (uint8_t)(bootinfo->reserved2 & 0xFFu);
     fb_blue_position = (uint8_t)((bootinfo->reserved2 >> 8) & 0xFFu);
-    if (!fb_ptr || bootinfo->fb_pitch == 0 || fb_pitch_pixels == 0 || fb_w == 0 || fb_h == 0)
+    if (!fb_ptr || fb_w == 0 || fb_h == 0 ||
+        (size_t)fb_w > (size_t)-1 / sizeof(uint32_t) ||
+        bootinfo->fb_pitch < (size_t)fb_w * sizeof(uint32_t) ||
+        (bootinfo->fb_pitch % sizeof(uint32_t)) != 0 || fb_pitch_pixels == 0 ||
+        (size_t)bootinfo->fb_pitch > (size_t)-1 / fb_h)
+    {
+        fb_ptr = NULL;
+        fb_pitch_pixels = 0;
+        fb_w = 0;
+        fb_h = 0;
+        vbe_ready = 0;
+        return 0;
+    }
+    framebuffer_bytes = (size_t)bootinfo->fb_pitch * fb_h;
+    if (bootinfo->fb_size < framebuffer_bytes || !framebuffer_format_valid())
     {
         fb_ptr = NULL;
         fb_pitch_pixels = 0;
@@ -358,7 +417,7 @@ uint32_t *vbe_framebuffer(void)
 
 uint32_t vbe_pitch(void)
 {
-    return bootinfo->fb_pitch;
+    return vbe_ready ? bootinfo->fb_pitch : 0;
 }
 
 uint32_t vbe_width(void)
@@ -369,6 +428,13 @@ uint32_t vbe_width(void)
 uint32_t vbe_height(void)
 {
     return fb_h;
+}
+
+int vbe_color_is_native(void)
+{
+    return vbe_ready && fb_red_mask == 8 && fb_red_position == 16 &&
+           fb_green_mask == 8 && fb_green_position == 8 &&
+           fb_blue_mask == 8 && fb_blue_position == 0;
 }
 
 static uint32_t pack_channel(uint32_t channel, uint8_t mask, uint8_t position)
@@ -399,12 +465,15 @@ uint32_t vbe_pack_color(uint32_t color)
 
 void vbe_clear(uint32_t color)
 {
+    uint32_t packed;
+    size_t total;
     if (!vbe_ready)
         return;
 
-    uint32_t total = fb_pitch_pixels * fb_h;
-    for (uint32_t i = 0; i < total; ++i)
-        fb_ptr[i] = vbe_pack_color(color);
+    packed = vbe_pack_color(color);
+    total = (size_t)fb_pitch_pixels * fb_h;
+    for (size_t i = 0; i < total; ++i)
+        fb_ptr[i] = packed;
 }
 
 void vbe_draw_pixel(int x, int y, uint32_t color)
@@ -416,27 +485,23 @@ void vbe_draw_pixel(int x, int y, uint32_t color)
     if ((uint32_t)x >= fb_w || (uint32_t)y >= fb_h)
         return;
 
-    fb_ptr[y * fb_pitch_pixels + x] = vbe_pack_color(color);
+    fb_ptr[(size_t)y * fb_pitch_pixels + (size_t)x] = vbe_pack_color(color);
 }
 
 void vbe_fill_rect(int x, int y, int w, int h, uint32_t color)
 {
+    uint32_t packed;
     if (!vbe_ready)
         return;
+    if (!clip_framebuffer_rect(&x, &y, &w, &h))
+        return;
 
+    packed = vbe_pack_color(color);
     for (int row = 0; row < h; ++row)
     {
-        int dst_y = y + row;
-        if (dst_y < 0 || (uint32_t)dst_y >= fb_h)
-            continue;
-        uint32_t *dst = fb_ptr + dst_y * fb_pitch_pixels;
+        uint32_t *dst = fb_ptr + (size_t)(y + row) * fb_pitch_pixels + (size_t)x;
         for (int col = 0; col < w; ++col)
-        {
-            int dst_x = x + col;
-            if (dst_x < 0 || (uint32_t)dst_x >= fb_w)
-                continue;
-            dst[dst_x] = vbe_pack_color(color);
-        }
+            dst[col] = packed;
     }
 }
 
