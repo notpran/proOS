@@ -63,6 +63,20 @@ static int framebuffer_format_valid(void)
            color_mask_valid(fb_blue_mask, fb_blue_position);
 }
 
+static int ranges_overlap(uint64_t first_start, uint64_t first_size,
+                          uint64_t second_start, uint64_t second_size)
+{
+    uint64_t first_end;
+    uint64_t second_end;
+    if (first_size == 0 || second_size == 0)
+        return 0;
+    first_end = first_start + first_size;
+    second_end = second_start + second_size;
+    if (first_end < first_start || second_end < second_start)
+        return 1;
+    return first_start < second_end && second_start < first_end;
+}
+
 static int clip_framebuffer_rect(int *x, int *y, int *width, int *height)
 {
     int64_t left;
@@ -329,6 +343,8 @@ static void console_newline(void)
 int vbe_init(void)
 {
     size_t framebuffer_bytes;
+    uintptr_t heap_base;
+    uintptr_t heap_limit;
     font_external_blob = NULL;
     font_base = &font8x8_basic[0][0];
     if (!configure_font_metrics(8, 8, DEFAULT_FONT_WIDTH, 32, 96, 1))
@@ -364,7 +380,13 @@ int vbe_init(void)
         return 0;
     }
     framebuffer_bytes = (size_t)bootinfo->fb_pitch * fb_h;
-    if (bootinfo->fb_size < framebuffer_bytes || !framebuffer_format_valid())
+    heap_base = memory_heap_base();
+    heap_limit = memory_heap_limit();
+    if (bootinfo->fb_size < framebuffer_bytes || !framebuffer_format_valid() ||
+        ranges_overlap((uint64_t)(uintptr_t)fb_ptr, framebuffer_bytes,
+                       (uint64_t)bootinfo->fat_ptr, bootinfo->fat_size) ||
+        ranges_overlap((uint64_t)(uintptr_t)fb_ptr, framebuffer_bytes,
+                       (uint64_t)heap_base, (uint64_t)(heap_limit - heap_base)))
     {
         fb_ptr = NULL;
         fb_pitch_pixels = 0;

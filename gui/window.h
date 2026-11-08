@@ -25,6 +25,7 @@ typedef struct
     int32_t y;
     uint32_t code;
     uint32_t buttons;
+    uint32_t flags;
 } gui_event_t;
 
 struct gui_window;

@@ -97,7 +97,8 @@ KERNEL_OBJS := $(BUILD_DIR)/crt0.o \
 GUI_OBJS := $(BUILD_DIR)/gui/graphics.o \
 		    $(BUILD_DIR)/gui/window.o \
 		    $(BUILD_DIR)/gui/compositor.o \
-		    $(BUILD_DIR)/gui/desktop.o
+		    $(BUILD_DIR)/gui/desktop.o \
+		    $(BUILD_DIR)/gui/shell.o
 
 KERNEL_OBJS += $(GUI_OBJS)
 
@@ -123,7 +124,7 @@ $(EMBEDDED_FONT_OBJ): $(EMBEDDED_FONT) | $(BUILD_DIR)
 	$(OBJCOPY) -I binary -O elf32-i386 -B i386 --rename-section .data=.rodata,alloc,load,readonly,data,contents $< $@
 endif
 
-.PHONY: all clean run-qemu iso
+.PHONY: all clean run-qemu iso FORCE
  
 all: $(DISK_IMG)
 
@@ -133,8 +134,10 @@ $(BUILD_DIR):
 $(STAGE1): boot/mbr.asm | $(BUILD_DIR)
 	$(NASM) -f bin $< -o $@
 
-$(STAGE2): boot/stage2.asm Makefile | $(BUILD_DIR)
+$(STAGE2): boot/stage2.asm Makefile FORCE | $(BUILD_DIR)
 	$(NASM) -f bin -DSTAGE2_SECTORS=$(STAGE2_SECTORS) -DKERNEL_SECTORS=$(KERNEL_SECTORS) -DFAT16_SECTORS=$(FAT16_SECTORS) $< -o $@
+
+FORCE:
 
 $(BUILD_DIR)/crt0.o: kernel/crt0.s | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
@@ -198,6 +201,9 @@ iso: $(ISO_IMG)
 
 run-qemu: $(DISK_IMG)
 	qemu-system-i386 -drive format=raw,file=$(DISK_IMG)
+
+run-debug: $(DISK_IMG)
+	qemu-system-i386 -drive format=raw,file=$(DISK_IMG) -no-reboot -no-shutdown -d int,cpu_reset,guest_errors -D qemu.log
 
 clean:
 	rm -rf $(BUILD_DIR)

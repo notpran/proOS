@@ -25,6 +25,7 @@
 #include "bios_fallback.h"
 #include "service.h"
 #include "service_types.h"
+#include "cli.h"
 #include "net.h"
 #include "e1000.h"
 #include "../gui/desktop.h"
@@ -41,9 +42,25 @@ extern void user_gui(void);
 
 static struct fatfs_volume extra_fat_volumes[EXTRA_FAT_DISKS];
 static void *extra_fat_buffers[EXTRA_FAT_DISKS];
+static volatile int cli_recovery_requested;
+
+static void print_banner(void);
+
+void cli_request_recovery(void)
+{
+    cli_recovery_requested = 1;
+}
+
+int cli_recovery_active(void)
+{
+    return cli_recovery_requested != 0;
+}
 
 static void shell_task(void)
 {
+    while (!cli_recovery_requested)
+        process_sleep(10);
+    print_banner();
     shell_run();
     process_exit(0);
 }
@@ -53,7 +70,7 @@ static void print_banner(void)
     vga_set_color(0xF, 0x0);
     vga_write_line("proOS (Protected Mode)");
     vga_set_color(0xA, 0x0);
-    vga_write_line("version: v0.10 b1");
+    vga_write_line("version: v0.10 b3");
     vga_set_color(0x7, 0x0);
     vga_write_line("Type 'help' to list commands!");
     vga_write_char('\n');
@@ -242,6 +259,8 @@ void kmain(void)
     service_system_init();
     klog_init();
     klog_info("kernel: video initialized");
+    if (!vbe_available())
+        klog_warn("kernel: framebuffer unavailable or overlaps reserved memory; CLI fallback enabled");
     log_vbe_bootinfo();
     klog_info("kernel: memory initialized");
     if (vfs_init() < 0)
@@ -317,6 +336,11 @@ void kmain(void)
     service_register(SYSTEM_SERVICE_GUI, "gui", user_gui, svc_rights);
     service_bootstrap();
     klog_info("kernel: services launched");
+    if (service_pid(SYSTEM_SERVICE_GUI) <= 0)
+    {
+        cli_request_recovery();
+        klog_warn("kernel: GUI service unavailable; CLI recovery enabled");
+    }
     if (process_create(user_init, PROC_STACK_SIZE) < 0)
     {
         vga_write_line("init process failed");
@@ -332,7 +356,6 @@ void kmain(void)
         klog_info("kernel: shell thread spawned");
 
     debug_publish_all();
-    print_banner();
     __asm__ __volatile__("sti");
     klog_info("kernel: interrupts enabled");
     process_schedule();

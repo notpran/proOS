@@ -2,6 +2,7 @@
 
 #include "graphics.h"
 #include "pit.h"
+#include "shell.h"
 
 #define DESKTOP_COLOR 0x0018202Cu
 #define WINDOW_COLOR 0x00E5E7EBu
@@ -32,6 +33,31 @@ static int clamp_coordinate(int64_t value)
 static int add_coordinate(int value, int delta)
 {
     return clamp_coordinate((int64_t)value + delta);
+}
+
+static void draw_cursor(gfx_surface_t *surface, int x, int y)
+{
+    if (!surface)
+        return;
+    for (int row = 0; row < 16; ++row)
+    {
+        int width = row < 11 ? row / 2 + 1 : 5;
+        gfx_fill_rect(surface, x - 1, y + row, 1, 1, 0x00000000u);
+        gfx_fill_rect(surface, x + width, y + row, 1, 1, 0x00000000u);
+        gfx_fill_rect(surface, x, y + row, width, 1, CURSOR_COLOR);
+    }
+    for (int row = 10; row < 16; ++row)
+        gfx_fill_rect(surface, x + 3, y + row, 4, 1, 0x00000000u);
+    gfx_fill_rect(surface, x + 4, y + 11, 3, 5, CURSOR_COLOR);
+}
+
+static int clamp_resize_dimension(int value, uint32_t minimum)
+{
+    if (value < (int)minimum)
+        return (int)minimum;
+    if (value > 0x3FFFFFFF)
+        return 0x3FFFFFFF;
+    return value;
 }
 
 static uint32_t divide_u32(uint32_t dividend, uint32_t divisor)
@@ -65,6 +91,7 @@ void gui_compositor_init(void)
     fps_tick = get_ticks();
     drag_window = NULL;
     resize_window = NULL;
+    gui_shell_init();
 }
 
 void gui_compositor_set_cursor(int x, int y)
@@ -100,7 +127,7 @@ void gui_compositor_render(void)
     size_t count;
     if (!backbuffer)
         return;
-    gfx_clear(DESKTOP_COLOR);
+    gui_shell_render_background(backbuffer);
     count = gui_window_snapshot(windows, GUI_MAX_WINDOWS);
     for (size_t order = 0; order < count; ++order)
     {
@@ -127,8 +154,8 @@ void gui_compositor_render(void)
         gfx_draw_rect(backbuffer, add_coordinate(selected->x, -1), add_coordinate(selected->y, -20),
                       (int)selected->width + 2, (int)selected->height + 21, WINDOW_BORDER);
     }
-    gfx_fill_rect(backbuffer, cursor_x, cursor_y, 2, 14, CURSOR_COLOR);
-    gfx_fill_rect(backbuffer, cursor_x, cursor_y, 10, 2, CURSOR_COLOR);
+    gui_shell_render_overlay(backbuffer);
+    draw_cursor(backbuffer, cursor_x, cursor_y);
     gfx_present();
     ++frame_count;
     ++frames_since_tick;
@@ -151,6 +178,10 @@ void gui_compositor_dispatch(const gui_event_t *event)
 {
     gui_window_t *windows[GUI_MAX_WINDOWS];
     size_t count = gui_window_snapshot(windows, GUI_MAX_WINDOWS);
+    if (drag_window && drag_window->id == 0)
+        drag_window = NULL;
+    if (resize_window && resize_window->id == 0)
+        resize_window = NULL;
     if (event && event->type == GUI_EVENT_MOUSE_MOVE)
     {
         gui_compositor_set_cursor(add_coordinate(cursor_x, event->x),
@@ -160,12 +191,20 @@ void gui_compositor_dispatch(const gui_event_t *event)
                             add_coordinate(drag_window->y, event->y));
         if (resize_window && (event->buttons & 1u))
         {
-            resize_width = add_coordinate(resize_width, event->x);
-            resize_height = add_coordinate(resize_height, event->y);
+            resize_width = clamp_resize_dimension(add_coordinate(resize_width, event->x),
+                                                  resize_window->min_width);
+            resize_height = clamp_resize_dimension(add_coordinate(resize_height, event->y),
+                                                   resize_window->min_height);
         }
     }
     if (event && event->type == GUI_EVENT_MOUSE_BUTTON_DOWN && event->code == 1u)
     {
+        if (gui_shell_dispatch(event, cursor_x, cursor_y))
+        {
+            drag_window = NULL;
+            resize_window = NULL;
+            return;
+        }
         gui_window_t *hit = NULL;
         for (size_t i = 0; i < count; ++i)
         {
@@ -204,9 +243,11 @@ void gui_compositor_dispatch(const gui_event_t *event)
             }
         }
     }
+    if (event && event->type == GUI_EVENT_MOUSE_MOVE)
+        (void)gui_shell_dispatch(event, cursor_x, cursor_y);
     if (event && event->type == GUI_EVENT_MOUSE_BUTTON_UP && event->code == 1u)
     {
-        if (resize_window)
+        if (resize_window && resize_window->id != 0)
             gui_window_resize(resize_window, (uint32_t)resize_width, (uint32_t)resize_height);
         drag_window = NULL;
         resize_window = NULL;

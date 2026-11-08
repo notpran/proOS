@@ -121,8 +121,11 @@ static void process_pending_events(void)
     while (irq_mailbox_receive(&mouse_mailbox, &event))
     {
         uint8_t value = (uint8_t)(event.data & 0xFFu);
-        if (packet_count == 0 && (value & 0x08u) == 0u)
-            continue;
+        if (packet_count == 0)
+        {
+            if ((value & 0x08u) == 0u || (value & 0xC0u) != 0u)
+                continue;
+        }
         packet[packet_count++] = value;
         if (packet_count == 3)
         {

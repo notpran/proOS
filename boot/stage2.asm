@@ -384,8 +384,7 @@ pm_entry:
     mov eax, [vbe_bpp]
     mov [BOOT_INFO_ADDR + 24], eax
 
-    ; Preserve the VBE RGB mask sizes and field positions. The kernel
-    ; stores each pair in one reserved boot-info word for color packing.
+    ; Preserve VBE RGB mask sizes and field positions for kernel color packing.
     xor eax, eax
     mov al, [vbe_mode_info + 0x1F]
     mov ah, [vbe_mode_info + 0x20]

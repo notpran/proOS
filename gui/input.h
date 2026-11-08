@@ -21,7 +21,10 @@ typedef struct
     int32_t y;
     uint32_t code;
     uint32_t buttons;
+    uint32_t flags;
 } gui_input_event_t;
+
+#define GUI_INPUT_FLAG_REPEAT 0x00000001u
 
 #define GUI_INPUT_IPC_TYPE 0x47554901u
 

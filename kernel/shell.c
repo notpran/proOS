@@ -3250,7 +3250,41 @@ static void command_gui(const char *args)
         return;
     }
 
-    vga_write_line("Usage: gui [info|windows|processes|fps|smoke|redraw]");
+    if (shell_str_equals(command, "minimize"))
+    {
+        gui_window_t *windows[GUI_MAX_WINDOWS];
+        size_t count = gui_window_snapshot(windows, GUI_MAX_WINDOWS);
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (windows[i]->focused)
+            {
+                gui_window_minimize(windows[i]);
+                vga_write_line("GUI focused window minimized.");
+                return;
+            }
+        }
+        vga_write_line("GUI has no focused window.");
+        return;
+    }
+
+    if (shell_str_equals(command, "restore"))
+    {
+        gui_window_t *windows[GUI_MAX_WINDOWS];
+        size_t count = gui_window_snapshot(windows, GUI_MAX_WINDOWS);
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (windows[i]->minimized)
+            {
+                gui_window_restore(windows[i]);
+                vga_write_line("GUI window restored.");
+                return;
+            }
+        }
+        vga_write_line("GUI has no minimized window.");
+        return;
+    }
+
+    vga_write_line("Usage: gui [info|windows|processes|fps|smoke|redraw|minimize|restore]");
 }
 
 static const char *logs_resolve_path(const char *name)

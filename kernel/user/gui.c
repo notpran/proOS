@@ -2,6 +2,7 @@
 #include "../../gui/desktop.h"
 #include "../../gui/input.h"
 #include "../klog.h"
+#include "../cli.h"
 
 static void gui_process_input(void)
 {
@@ -23,6 +24,7 @@ void user_gui(void)
     if (gui_desktop_init() < 0)
     {
         klog_error("gui: desktop initialization failed");
+        cli_request_recovery();
         sys_exit(1);
         return;
     }
@@ -30,7 +32,13 @@ void user_gui(void)
     for (;;)
     {
         gui_process_input();
-        gui_desktop_show();
+        if (gui_desktop_show() < 0)
+        {
+            klog_error("gui: desktop render failed");
+            cli_request_recovery();
+            sys_exit(1);
+            return;
+        }
         sys_sleep(4);
     }
 }

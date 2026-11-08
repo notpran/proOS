@@ -5,6 +5,7 @@
 #include "window.h"
 #include "proc.h"
 #include "input.h"
+#include "../kernel/cli.h"
 
 static int desktop_ready;
 
@@ -94,11 +95,23 @@ int gui_desktop_run_input_event(const gui_input_event_t *input)
     gui_event_t event;
     if (!input)
         return -1;
+    if (input->type <= GUI_INPUT_NONE || input->type > GUI_INPUT_KEY_UP)
+        return -1;
+    if ((input->type == GUI_INPUT_MOUSE_BUTTON_DOWN ||
+         input->type == GUI_INPUT_MOUSE_BUTTON_UP) &&
+        (input->code == 0 || input->code > 4u))
+        return -1;
+    if (input->type == GUI_INPUT_KEY_DOWN && input->code == GUI_KEY_ESCAPE)
+    {
+        cli_request_recovery();
+        return 0;
+    }
     event.type = (gui_event_type_t)input->type;
     event.x = input->x;
     event.y = input->y;
     event.code = input->code;
     event.buttons = input->buttons;
+    event.flags = input->flags;
     gui_compositor_dispatch(&event);
     return 0;
 }

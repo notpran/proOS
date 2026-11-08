@@ -745,14 +745,15 @@ static struct process *scheduler_create_thread(process_entry_t entry, size_t sta
 
 	uint32_t *stack_top = stack_align((uint32_t *)(proc_exec->stack + stack_size));
 	uint32_t *sp = stack_top;
-	*--sp = (uint32_t)thread_bootstrap;
-	*--sp = 0u;
-	*--sp = 0x202u;
-	*--sp = 0u;
-	*--sp = 0u;
-	*--sp = 0u;
-	*--sp = 0u;
-	*--sp = 0u;
+	*--sp = (uint32_t)thread_bootstrap; /* return address */
+	*--sp = 0u;                         /* saved ebp */
+	*--sp = 0x202u;                     /* saved eflags */
+	*--sp = 0u;                         /* saved eax */
+	*--sp = 0u;                         /* saved ebx */
+	*--sp = 0u;                         /* saved ecx */
+	*--sp = 0u;                         /* saved edx */
+	*--sp = 0u;                         /* saved esi */
+	*--sp = 0u;                         /* saved edi */
 	*--sp = 0u;
 	proc_exec->ctx.esp = (uint32_t)sp;
 
