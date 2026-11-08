@@ -8,7 +8,7 @@ This document records the Phase 10.4 input path from source inspection. Build, e
 
 Keyboard input follows:
 
-`PS/2 IRQ -> ps2kbd module IRQ mailbox -> module FIFO -> SYS_KBD_POLL -> user_inputd -> IPC -> user_gui -> gui_desktop_run_input_event -> gui_compositor_dispatch`.
+`PS/2 IRQ -> kernel/keyboard.c legacy IRQ handler and queue -> legacy keyboard poll syscall -> user_inputd -> IPC -> user_gui -> gui_desktop_run_input_event -> gui_compositor_dispatch`.
 
 Mouse input follows:
 
@@ -32,7 +32,7 @@ Interrupt-side work remains limited to reading device data and dispatching it in
 
 Keyboard arrow press and release events are normalized to the same GUI arrow constants. `inputd` tracks 256 key slots and marks a repeated key-down without suppressing the event. Reconnecting to the GUI service resets key and mouse transient state.
 
-The keyboard module's fixed FIFO is bounded and drops new entries when full. The mouse module's fixed FIFO is also bounded and drops new entries when full. No interrupt handler allocates memory or blocks on the GUI.
+The legacy keyboard queue is bounded and drops new entries when full. The `ps2kbd` module remains in the build for compatibility, but GUI input uses the legacy keyboard syscall so CLI recovery and GUI input share one decoder and queue. The mouse module's fixed FIFO is also bounded and drops new entries when full. No interrupt handler allocates memory or blocks on the GUI.
 
 ## Cursor and focus
 

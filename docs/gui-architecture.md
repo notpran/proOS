@@ -69,7 +69,7 @@ Pointer policy:
 1. Cursor deltas are applied and clamped to framebuffer bounds.
 2. A primary-button press hit-tests visible, non-minimized windows from highest z-order down.
 3. A hit window is focused and raised.
-4. The title bar begins a drag; the lower-right corner begins a resize; the close control dispatches `GUI_EVENT_CLOSE`.
+4. The title bar begins a drag; the yellow title-bar control minimizes; the lower-right corner begins a resize; the close control dispatches `GUI_EVENT_CLOSE`.
 5. Mouse release commits a bounded resize and clears drag/resize state.
 6. Destroyed windows are detected and removed from compositor interaction pointers before later events.
 

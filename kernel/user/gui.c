@@ -31,7 +31,6 @@ void user_gui(void)
 
     for (;;)
     {
-        gui_process_input();
         if (gui_desktop_show() < 0)
         {
             klog_error("gui: desktop render failed");
@@ -39,6 +38,7 @@ void user_gui(void)
             sys_exit(1);
             return;
         }
+        gui_process_input();
         sys_sleep(4);
     }
 }

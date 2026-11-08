@@ -9,7 +9,7 @@
 
 #define USER_SCHED_POLICY_FAIR 0u
 #define USER_SCHED_POLICY_DEADLINE 1u
-#define SYS_KBD_POLL (SYS_DYNAMIC_BASE + 0u)
+#define SYS_KBD_POLL (SYS_DYNAMIC_BASE + 2u)
 #define SYS_MOUSE_POLL (SYS_DYNAMIC_BASE + 1u)
 
 struct user_keyboard_event

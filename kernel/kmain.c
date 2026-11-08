@@ -8,6 +8,7 @@
 #include "syscall.h"
 #include "memory.h"
 #include "vbe.h"
+#include "keyboard.h"
 #include "fat16.h"
 #include "fatfs.h"
 #include "gfx.h"
@@ -58,6 +59,14 @@ int cli_recovery_active(void)
 
 static void shell_task(void)
 {
+    uint32_t wait_ticks = 0;
+    while (!cli_recovery_requested && wait_ticks < 500u && !gui_desktop_smoke_status())
+    {
+        process_sleep(10);
+        wait_ticks += 10;
+    }
+    if (!gui_desktop_smoke_status())
+        cli_request_recovery();
     while (!cli_recovery_requested)
         process_sleep(10);
     print_banner();
@@ -316,6 +325,8 @@ void kmain(void)
 
     e1000_driver_init();
     module_system_init();
+    kb_init();
+    klog_info("kernel: keyboard IRQ path ready");
     klog_info("kernel: module system online");
     volmgr_init();
     klog_info("kernel: volume manager ready");

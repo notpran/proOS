@@ -1,6 +1,8 @@
 #include "keyboard.h"
 #include "interrupts.h"
 #include "io.h"
+#include "pit.h"
+#include "syscall.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -13,6 +15,41 @@ static volatile uint32_t head = 0;
 static volatile uint32_t tail = 0;
 static volatile int shift_active = 0;
 static volatile int extended_active = 0;
+static int legacy_syscall_registered;
+
+#define SYS_LEGACY_KBD_POLL (SYS_DYNAMIC_BASE + 2u)
+
+static int32_t sys_legacy_kbd_poll(struct syscall_envelope *message)
+{
+    struct legacy_keyboard_event
+    {
+        uint32_t timestamp;
+        uint32_t payload;
+        uint8_t ch;
+        uint8_t reserved[3];
+    };
+    struct legacy_keyboard_event *event;
+
+    if (!message || message->argc < 1)
+        return -1;
+    event = (struct legacy_keyboard_event *)(uintptr_t)message->args[0];
+    if (syscall_validate_user_buffer(event, sizeof(*event)) < 0)
+        return -1;
+    event->ch = (uint8_t)kb_getchar();
+    if (!event->ch)
+    {
+        if (!kb_poll())
+            return 0;
+        event->ch = (uint8_t)kb_getchar();
+    }
+
+    event->timestamp = (uint32_t)get_ticks();
+    event->payload = 0;
+    event->reserved[0] = 0;
+    event->reserved[1] = 0;
+    event->reserved[2] = 0;
+    return event->ch ? 1 : 0;
+}
 
 static const char keymap[128] = {
     0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t',
@@ -179,6 +216,9 @@ void kb_init(void)
     shift_active = 0;
     extended_active = 0;
     irq_install_handler(1, keyboard_irq_handler);
+    if (!legacy_syscall_registered &&
+        syscall_register_handler(SYS_LEGACY_KBD_POLL, sys_legacy_kbd_poll, "legacy-kbd.poll") == 0)
+        legacy_syscall_registered = 1;
 }
 
 char kb_getchar(void)

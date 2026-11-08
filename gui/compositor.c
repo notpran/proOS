@@ -9,6 +9,7 @@
 #define WINDOW_BORDER 0x0038BDF8u
 #define TITLE_COLOR 0x001F2937u
 #define CURSOR_COLOR 0x00FFFFFFu
+#define MINIMIZE_COLOR 0x00F2B84Bu
 
 static int cursor_x;
 static int cursor_y;
@@ -150,6 +151,8 @@ void gui_compositor_render(void)
                      (int)selected->width + 2, 20, TITLE_COLOR);
         gfx_fill_rect(backbuffer, add_coordinate(selected->x, (int)selected->width - 16),
                      add_coordinate(selected->y, -16), 12, 12, 0x00DC2626u);
+        gfx_fill_rect(backbuffer, add_coordinate(selected->x, (int)selected->width - 32),
+                 add_coordinate(selected->y, -16), 12, 12, MINIMIZE_COLOR);
         gfx_blit(backbuffer, selected->surface, selected->x, selected->y);
         gfx_draw_rect(backbuffer, add_coordinate(selected->x, -1), add_coordinate(selected->y, -20),
                       (int)selected->width + 2, (int)selected->height + 21, WINDOW_BORDER);
@@ -225,6 +228,13 @@ void gui_compositor_dispatch(const gui_event_t *event)
         if (hit)
         {
             gui_window_focus(hit);
+            if (cursor_y < hit->y &&
+                (int64_t)cursor_x >= (int64_t)hit->x + hit->width - 36 &&
+                (int64_t)cursor_x < (int64_t)hit->x + hit->width - 22)
+            {
+                gui_window_minimize(hit);
+                return;
+            }
             if (cursor_y < hit->y &&
                 (int64_t)cursor_x >= (int64_t)hit->x + hit->width - 20)
             {

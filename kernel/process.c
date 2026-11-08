@@ -754,7 +754,6 @@ static struct process *scheduler_create_thread(process_entry_t entry, size_t sta
 	*--sp = 0u;                         /* saved edx */
 	*--sp = 0u;                         /* saved esi */
 	*--sp = 0u;                         /* saved edi */
-	*--sp = 0u;
 	proc_exec->ctx.esp = (uint32_t)sp;
 
 	sid_t target_session = security_session_kernel();
